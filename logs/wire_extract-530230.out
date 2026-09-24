@@ -1,0 +1,36 @@
+[ 1/1] SF251213M_65000×_24        wires  424 (excl border  399) junctions  252 accept 0.4183 len med   105.1 nm peaks [17.0, 31.0, 63.0, 123.0, 169.0, 179.0]
+wrote results/wire_extract/extract_summary.json (1 frames)
+
+=== GT measurement validation: TiS3_80000x_1 ===
+metric                                         GT         v3    v3/GT
+wire count (all)                            199.0      225.0    1.131
+wire count (excl border)                    189.0      206.0    1.090
+length median nm (all)                      273.9      213.8    0.781
+length mean nm (all)                        333.8      273.1    0.818
+length median nm (excl border)              270.4      218.3    0.808
+width mean nm (median over wires)            44.7       47.5    1.063
+junction count                              120.0      148.0    1.233
+family frac 0.0                             0.317      0.316
+family frac 60.0                            0.362      0.351
+family frac 123.5                           0.312      0.284
+KS stat on lengths (all)                   0.1176  p=0.097
+pixel family agreement                     0.8780  (n=62579)
+
+=== GT measurement validation: TiS3_80000x_2 ===
+metric                                         GT         v3    v3/GT
+wire count (all)                            174.0      162.0    0.931
+wire count (excl border)                    166.0      148.0    0.892
+length median nm (all)                      204.7      178.9    0.874
+length mean nm (all)                        287.6      256.5    0.892
+length median nm (excl border)              204.7      188.1    0.919
+width mean nm (median over wires)            37.0       59.2    1.601
+junction count                              120.0      105.0    0.875
+family frac 0.0                             0.385      0.352
+family frac 60.0                            0.264      0.302
+family frac 123.5                           0.333      0.302
+KS stat on lengths (all)                   0.1060  p=0.276
+pixel family agreement                     0.8616  (n=46880)
+
+combined KS on lengths (both frames): 0.1025 p=0.0336
+wrote results/wire_extract/gt_validation.json
+wire_extract done

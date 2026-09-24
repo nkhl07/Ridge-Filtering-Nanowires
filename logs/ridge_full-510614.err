@@ -1,0 +1,2 @@
+/cm/local/apps/slurm/var/spool/job510614/slurm_script: line 28: 794822 Killed                  venv/venv_l40s/bin/python scripts/ridge_nanowire_images2.py "$@"
+[2026-07-31T16:31:32.348] error: Detected 1 oom_kill event in StepId=510614.batch. Some of the step tasks have been OOM Killed.

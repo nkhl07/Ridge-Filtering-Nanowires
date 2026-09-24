@@ -1,0 +1,133 @@
+pipeline: v3 texture+ridge RF (2026-07-24)
+[ 1/62] SF251213M_200000×_13       [256, 384]     x0.250 coverage 16.29% [extrapolated_scale]
+[ 2/62] SF251213M_200000×_26       [256, 384]     x0.250 coverage 17.99% [extrapolated_scale]
+[ 3/62] SF251213M_200000×_40       [256, 384]     x0.250 coverage 12.76% [extrapolated_scale]
+[ 4/62] SF251213M_150000×_11       [341, 512]     x0.333 coverage 20.63% [extrapolated_scale]
+[ 5/62] SF251213M_150000×_19       [341, 512]     x0.333 coverage 15.90% [extrapolated_scale]
+[ 6/62] SF251213M_150000×_21       [341, 512]     x0.333 coverage 19.85% [extrapolated_scale]
+[ 7/62] SF251213M_150000×_25       [341, 512]     x0.333 coverage 15.08% [extrapolated_scale]
+[ 8/62] SF251213M_150000×_29       [341, 512]     x0.333 coverage 16.54% [extrapolated_scale]
+[ 9/62] SF251213M_65000×_60        [394, 591]     x0.385 coverage 12.66% [mag_mismatch] [extrapolated_scale]
+[10/62] SF251213M_120000×_17       [427, 640]     x0.417 coverage 16.90% [extrapolated_scale]
+[11/62] SF251213M_120000×_4        [427, 640]     x0.417 coverage 17.13% [extrapolated_scale]
+[12/62] SF251213M_120000×_42       [427, 640]     x0.417 coverage 15.71% [extrapolated_scale]
+[13/62] SF251213M_120000×_47       [427, 640]     x0.417 coverage 22.18% [extrapolated_scale]
+[14/62] SF251213M_120000×_6        [427, 640]     x0.417 coverage 14.14% [extrapolated_scale]
+[15/62] SF251213M_100000×_18       [512, 768]     x0.500 coverage 18.31% [extrapolated_scale]
+[16/62] SF251213M_100000×_5        [512, 768]     x0.500 coverage 15.00% [extrapolated_scale]
+[17/62] SF251213M_100000×_51       [512, 768]     x0.500 coverage 14.94% [extrapolated_scale]
+[18/62] SF251213M_100000×_8        [512, 768]     x0.500 coverage 23.33% [extrapolated_scale]
+[19/62] SF251213M_80000×_12        [640, 960]     x0.625 coverage 17.33%
+[20/62] SF251213M_80000×_27        [640, 960]     x0.625 coverage 14.12%
+[21/62] SF251213M_80000×_33        [640, 960]     x0.625 coverage 13.85%
+[22/62] SF251213M_80000×_34        [640, 960]     x0.625 coverage 17.53%
+[23/62] SF251213M_70000×_61        [731, 1097]    x0.714 coverage 14.51%
+[24/62] SF251213M_65000×_10        [788, 1182]    x0.769 coverage 18.66%
+[25/62] SF251213M_65000×_14        [788, 1182]    x0.769 coverage 19.06%
+[26/62] SF251213M_65000×_24        [788, 1182]    x0.769 coverage 13.69%
+[27/62] SF251213M_65000×_28        [788, 1182]    x0.769 coverage 12.46%
+[28/62] SF251213M_65000×_3         [788, 1182]    x0.769 coverage 17.76%
+[29/62] SF251213M_65000×_52        [788, 1182]    x0.769 coverage 12.46%
+[30/62] SF251213M_65000×_56        [788, 1182]    x0.769 coverage 11.95%
+[31/62] SF251213M_65000×_62        [788, 1182]    x0.769 coverage 12.81%
+[32/62] SF251213M_50000×_15        [1024, 1536]   x1.000 coverage 20.56%
+[33/62] SF251213M_50000×_20        [1024, 1536]   x1.000 coverage 16.58%
+[34/62] SF251213M_50000×_35        [1024, 1536]   x1.000 coverage 17.51%
+[35/62] SF251213M_50000×_37        [1024, 1536]   x1.000 coverage 13.52%
+[36/62] SF251213M_50000×_38        [1024, 1536]   x1.000 coverage 16.42%
+[37/62] SF251213M_50000×_39        [1024, 1536]   x1.000 coverage 16.74%
+[38/62] SF251213M_50000×_41        [1024, 1536]   x1.000 coverage 14.02%
+[39/62] SF251213M_50000×_50        [1024, 1536]   x1.000 coverage 14.10%
+[40/62] SF251213M_50000×_16        [1024, 1536]   x0.500 coverage 22.03% [mag_mismatch] [extrapolated_scale]
+[41/62] SF251213M_20000×_58        [1280, 1920]   x1.250 coverage  5.00% [mag_mismatch] [extrapolated_scale]
+[42/62] SF251213M_35000×_23        [1463, 2194]   x1.429 coverage 12.49% [extrapolated_scale]
+[43/62] SF251213M_35000×_32        [1463, 2194]   x1.429 coverage 11.17% [extrapolated_scale]
+[44/62] SF251213M_35000×_36        [1463, 2194]   x1.429 coverage 11.05% [extrapolated_scale]
+[45/62] SF251213M_35000×_45        [1463, 2194]   x1.429 coverage  7.80% [extrapolated_scale]
+[46/62] SF251213M_35000×_54        [1463, 2194]   x1.429 coverage 10.75% [extrapolated_scale]
+[47/62] SF251213M_25000×_22        [2048, 3072]   x2.000 coverage  6.39% [unreliable_upscale] [extrapolated_scale]
+[48/62] SF251213M_25000×_43        [2048, 3072]   x2.000 coverage  4.77% [unreliable_upscale] [extrapolated_scale]
+[49/62] SF251213M_25000×_55        [2048, 3072]   x2.000 coverage  7.06% [unreliable_upscale] [extrapolated_scale]
+[50/62] SF251213M_25000×_7         [2048, 3072]   x2.000 coverage 12.97% [unreliable_upscale] [extrapolated_scale]
+[51/62] SF251213M_12000×_59        [2133, 3200]   x2.083 coverage  7.34% [mag_mismatch] [unreliable_upscale] [extrapolated_scale]
+[52/62] SF251213M_20000×_48        [2560, 3840]   x2.500 coverage  7.17% [unreliable_upscale] [extrapolated_scale]
+[53/62] SF251213M_20000×_49        [2560, 3840]   x2.500 coverage 10.09% [unreliable_upscale] [extrapolated_scale]
+[54/62] SF251213M_20000×_53        [2560, 3840]   x2.500 coverage  4.05% [unreliable_upscale] [extrapolated_scale]
+[55/62] SF251213M_20000×_9         [2560, 3840]   x2.500 coverage 14.11% [unreliable_upscale] [extrapolated_scale]
+[56/62] SF251213M_15000×_31        [3413, 5120]   x3.333 coverage  4.13% [unreliable_upscale] [extrapolated_scale]
+[57/62] SF251213M_15000×_44        [3413, 5120]   x3.333 coverage  6.21% [unreliable_upscale] [extrapolated_scale]
+[58/62] SF251213M_15000×_46        [3413, 5120]   x3.333 coverage  6.35% [unreliable_upscale] [extrapolated_scale]
+[59/62] SF251213M_6500×_57         [3938, 5908]   x3.846 coverage  3.69% [mag_mismatch] [unreliable_upscale] [extrapolated_scale]
+[60/62] SF251213M_12000×_2         [4267, 6400]   x4.167 coverage  4.53% [unreliable_upscale] [extrapolated_scale]
+[61/62] SF251213M_12000×_30        [4267, 6400]   x4.167 coverage  3.20% [unreliable_upscale] [extrapolated_scale]
+[62/62] SF251213M_4010×_1          [12767, 19150] x12.467 coverage  0.77% [unreliable_upscale] [extrapolated_scale]
+
+  SF251213M_4010×_1          pseudo coverage  0.77% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_12000×_30        pseudo coverage  3.20% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_6500×_57         pseudo coverage  3.69% [mag_mismatch] [unreliable_upscale] [extrapolated_scale]
+  SF251213M_20000×_53        pseudo coverage  4.05% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_15000×_31        pseudo coverage  4.13% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_12000×_2         pseudo coverage  4.53% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_25000×_43        pseudo coverage  4.77% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_20000×_58        pseudo coverage  5.00% [mag_mismatch] [extrapolated_scale]
+  SF251213M_15000×_44        pseudo coverage  6.21% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_15000×_46        pseudo coverage  6.35% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_25000×_22        pseudo coverage  6.39% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_25000×_55        pseudo coverage  7.06% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_20000×_48        pseudo coverage  7.17% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_12000×_59        pseudo coverage  7.34% [mag_mismatch] [unreliable_upscale] [extrapolated_scale]
+  SF251213M_35000×_45        pseudo coverage  7.80% [extrapolated_scale]
+  SF251213M_20000×_49        pseudo coverage 10.09% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_35000×_54        pseudo coverage 10.75% [extrapolated_scale]
+  SF251213M_35000×_36        pseudo coverage 11.05% [extrapolated_scale]
+  SF251213M_35000×_32        pseudo coverage 11.17% [extrapolated_scale]
+  SF251213M_65000×_56        pseudo coverage 11.95%
+  SF251213M_65000×_28        pseudo coverage 12.46%
+  SF251213M_65000×_52        pseudo coverage 12.46%
+  SF251213M_35000×_23        pseudo coverage 12.49% [extrapolated_scale]
+  SF251213M_65000×_60        pseudo coverage 12.66% [mag_mismatch] [extrapolated_scale]
+  SF251213M_200000×_40       pseudo coverage 12.76% [extrapolated_scale]
+  SF251213M_65000×_62        pseudo coverage 12.81%
+  SF251213M_25000×_7         pseudo coverage 12.97% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_50000×_37        pseudo coverage 13.52%
+  SF251213M_65000×_24        pseudo coverage 13.69%
+  SF251213M_80000×_33        pseudo coverage 13.85%
+  SF251213M_50000×_41        pseudo coverage 14.02%
+  SF251213M_50000×_50        pseudo coverage 14.10%
+  SF251213M_20000×_9         pseudo coverage 14.11% [unreliable_upscale] [extrapolated_scale]
+  SF251213M_80000×_27        pseudo coverage 14.12%
+  SF251213M_120000×_6        pseudo coverage 14.14% [extrapolated_scale]
+  SF251213M_70000×_61        pseudo coverage 14.51%
+  SF251213M_100000×_51       pseudo coverage 14.94% [extrapolated_scale]
+  SF251213M_100000×_5        pseudo coverage 15.00% [extrapolated_scale]
+  SF251213M_150000×_25       pseudo coverage 15.08% [extrapolated_scale]
+  SF251213M_120000×_42       pseudo coverage 15.71% [extrapolated_scale]
+  SF251213M_150000×_19       pseudo coverage 15.90% [extrapolated_scale]
+  SF251213M_200000×_13       pseudo coverage 16.29% [extrapolated_scale]
+  SF251213M_50000×_38        pseudo coverage 16.42%
+  SF251213M_150000×_29       pseudo coverage 16.54% [extrapolated_scale]
+  SF251213M_50000×_20        pseudo coverage 16.58%
+  SF251213M_50000×_39        pseudo coverage 16.74%
+  SF251213M_120000×_17       pseudo coverage 16.90% [extrapolated_scale]
+  SF251213M_120000×_4        pseudo coverage 17.13% [extrapolated_scale]
+  SF251213M_80000×_12        pseudo coverage 17.33%
+  SF251213M_50000×_35        pseudo coverage 17.51%
+  SF251213M_80000×_34        pseudo coverage 17.53%
+  SF251213M_65000×_3         pseudo coverage 17.76%
+  SF251213M_200000×_26       pseudo coverage 17.99% [extrapolated_scale]
+  SF251213M_100000×_18       pseudo coverage 18.31% [extrapolated_scale]
+  SF251213M_65000×_10        pseudo coverage 18.66%
+  SF251213M_65000×_14        pseudo coverage 19.06%
+  SF251213M_150000×_21       pseudo coverage 19.85% [extrapolated_scale]
+  SF251213M_50000×_15        pseudo coverage 20.56%
+  SF251213M_150000×_11       pseudo coverage 20.63% [extrapolated_scale]
+  SF251213M_50000×_16        pseudo coverage 22.03% [mag_mismatch] [extrapolated_scale]
+  SF251213M_120000×_47       pseudo coverage 22.18% [extrapolated_scale]
+  SF251213M_100000×_8        pseudo coverage 23.33% [extrapolated_scale]
+
+46/62 frames (upscale<=2x) | median 15.39% | p25-p75 12.99-17.53% | range 5.00-23.33%
+
+21/62 frames (validated band 0.625-1.0) | median 14.51% | p25-p75 13.69-17.51% | range 11.95-20.56%
+references: 80k GT 12.8%/9.7% | v1 sato-only in-band median was 12.76%
+wrote results/ridge_nanowire_images2/ridge_coverage.json + 62 pseudo/overlay PNG pairs
+ridge_full done

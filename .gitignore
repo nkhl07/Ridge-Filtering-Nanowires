@@ -1,0 +1,7 @@
+# Data and generated outputs — not tracked
+data/
+results/
+
+# Python cache
+__pycache__/
+*.pyc
