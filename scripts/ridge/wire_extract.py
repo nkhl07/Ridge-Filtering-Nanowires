@@ -71,6 +71,12 @@ from ridge_nanowire_images2 import (TARGET_PX, line_kernel, load_frame_50k,
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def rel(path: Path) -> Path:
+    """Path relative to ROOT for logs/JSON; absolute if it lies outside ROOT."""
+    path = Path(path).resolve()
+    return path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+
 TARGET_NM = 5.4                 # nominal 50k-equivalent pixel size for the scale assert
 ONES3 = np.ones((3, 3), int)
 # circular (CCW) 8-neighborhood order for the Rutovitz crossing number
@@ -1093,7 +1099,7 @@ def run_gt_validation(out_root: Path, p, params: dict) -> None:
 
     with open(out_root / "gt_validation.json", "w") as f:
         json.dump(validation, f, indent=2, default=_jsonable)
-    print(f"wrote {out_root.relative_to(ROOT)}/gt_validation.json")
+    print(f"wrote {rel(out_root)}/gt_validation.json")
 
 
 def run_close_ab(out_root: Path, p, params: dict) -> None:
@@ -1239,7 +1245,7 @@ def run_close_ab(out_root: Path, p, params: dict) -> None:
 
     with open(out_root / "close_ab.json", "w") as f:
         json.dump(ab, f, indent=2, default=_jsonable)
-    print(f"wrote {out_root.relative_to(ROOT)}/close_ab.json")
+    print(f"wrote {rel(out_root)}/close_ab.json")
 
 
 # --------------------------------------------------------------------------
@@ -1314,6 +1320,8 @@ def parse_args(argv=None):
     ap.add_argument("--scale-tol", type=float, default=0.05,
                     help="allowed relative deviation of nm/px from 5.4 (in-band)")
     args = ap.parse_args(argv)
+    args.masks_dir, args.raw_dir, args.out = (args.masks_dir.resolve(), args.raw_dir.resolve(),
+                                              args.out.resolve())
     args.close_angles = [float(a) for a in args.close_angles.split(",")]
     args.family_centers = [float(a) for a in args.family_centers.split(",")]
     return args
@@ -1350,7 +1358,7 @@ def main() -> None:
         raise SystemExit("no frames selected")
 
     agg = {"pipeline": "wire_extract Phase 1 (skeleton->graph->measurements)",
-           "masks": str(cov_path.relative_to(ROOT)),
+           "masks": str(rel(cov_path)),
            "partial_run": bool(p.frames), "skipped_out_of_band": skipped,
            "params": params, "per_frame": {}}
     pooled_all, pooled_nb = [], []
@@ -1412,7 +1420,7 @@ def main() -> None:
         agg["pooled_length_nm_excl_border"] = _stats(pooled_nb)
         with open(out_root / "extract_summary.json", "w") as f:
             json.dump(agg, f, indent=2, default=_jsonable)
-        print(f"wrote {out_root.relative_to(ROOT)}/extract_summary.json "
+        print(f"wrote {rel(out_root)}/extract_summary.json "
               f"({len(names)} frames)")
 
     if p.validate_gt:
