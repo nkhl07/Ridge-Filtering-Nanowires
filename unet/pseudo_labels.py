@@ -19,7 +19,8 @@ Cleaning steps (order fixed, each toggleable in the config):
      (no probability map exists for this teacher), with a boundary ignore band
   2. narrow AND locally-dark hole fill inside wire components
   3. round small teacher components -> background
-  extras: teacher components touching saturated bright blobs -> ignore;
+  extras (applied after the graph, whose median wire width sets their radius):
+          teacher px within 2x median wire width of a saturated bright blob -> ignore;
           edges of large dark regions (charging bands) -> ignore
   4. wire px of graph chains failing curvature QC -> ignore (graph built on
      the teacher mask restricted to confidently supported components; see
@@ -108,40 +109,47 @@ def narrow_holes(wire: np.ndarray, max_halfwidth: float, gray: np.ndarray,
     return keep[hl], counts
 
 
-def round_particles(mask: np.ndarray, max_ratio: float, max_area: int) -> tuple[np.ndarray, int]:
+def round_particles(mask: np.ndarray, max_ratio: float, max_area: int,
+                    audit_min_area: int | None = None) -> tuple[np.ndarray, int, np.ndarray, int]:
     """Step 3. 8-connected components of `mask` (the whole teacher components,
     not confident-core fragments) that are both round (major/minor axis
-    ratio < max_ratio) and small (area < max_area). Returns (mask, count)."""
+    ratio < max_ratio) and small (area < max_area). Removed components with
+    area >= audit_min_area are also returned separately so the overlay can
+    show what a raised area limit newly removes. Returns (mask, count,
+    audit mask, audit count)."""
     lab, _ = ndi.label(mask, structure=ONES3)
     out = np.zeros_like(mask)
-    n = 0
+    audit = np.zeros_like(mask)
+    n = n_audit = 0
     for rp in regionprops(lab):
         if rp.area >= max_area:
             continue
         if rp.axis_major_length / max(rp.axis_minor_length, 1.0) < max_ratio:
             out[rp.coords[:, 0], rp.coords[:, 1]] = True
             n += 1
-    return out, n
+            if audit_min_area is not None and rp.area >= audit_min_area:
+                audit[rp.coords[:, 0], rp.coords[:, 1]] = True
+                n_audit += 1
+    return out, n, audit, n_audit
 
 
-def saturated_components(mask: np.ndarray, gray: np.ndarray, level: float,
-                         min_blob_px: int, touch_px: float) -> tuple[np.ndarray, int, int]:
-    """Extra. Components of `mask` touching (within touch_px of) a saturated
-    bright blob (gray >= level, >= min_blob_px px): the ridge filter traces the
-    dark rim around bright debris. Returns (mask of those components, n
-    components, n blobs)."""
+def saturated_near(mask: np.ndarray, gray: np.ndarray, level: float, min_blob_px: int,
+                   radius: float) -> tuple[np.ndarray, int]:
+    """Extra. Pixels of `mask` within `radius` px of a saturated bright blob
+    (gray >= level, >= min_blob_px px), i.e. the blob mask dilated by radius:
+    the ridge filter traces the dark rim around bright debris. Local on
+    purpose -- whole components would take entire wire networks linked by the
+    teacher's closing. Returns (mask of those px, n blobs)."""
     sat = gray >= level
     bl, nb = ndi.label(sat, structure=ONES3)
-    if nb == 0:
-        return np.zeros_like(mask), 0, 0
+    if nb == 0 or not np.isfinite(radius):
+        return np.zeros_like(mask), 0
     big = np.bincount(bl.ravel()) >= min_blob_px
     big[0] = False
     blobs = big[bl]
-    near = ndi.distance_transform_edt(~blobs) <= touch_px if blobs.any() else blobs
-    cl, _ = ndi.label(mask, structure=ONES3)
-    hit = np.unique(cl[near & mask])
-    hit = hit[hit > 0]
-    return np.isin(cl, hit), int(hit.size), int(big.sum())
+    if not blobs.any():
+        return np.zeros_like(mask), 0
+    return mask & (ndi.distance_transform_edt(~blobs) <= radius), int(big.sum())
 
 
 def dark_region_edges(gray: np.ndarray, sigma: float, dark_frac: float,
@@ -282,20 +290,59 @@ def clean_frame(gray: np.ndarray, pcfg: dict) -> tuple[np.ndarray, np.ndarray, d
     comps = teacher | m["filled"]            # whole teacher components (+ fills)
 
     pc = pcfg["particles"]
-    m["removed"] = zero
-    st["particles_removed"] = 0
+    m["removed"] = m["removed_audit"] = zero
+    st["particles_removed"] = st["particles_removed_audit"] = 0
     if pc["enabled"]:
-        m["removed"], st["particles_removed"] = round_particles(
-            comps, pc["max_axis_ratio"], pc["max_particle_area_px"])
+        m["removed"], st["particles_removed"], m["removed_audit"], st["particles_removed_audit"] = \
+            round_particles(comps, pc["max_axis_ratio"], pc["max_particle_area_px"],
+                            pc.get("audit_prev_max_area_px"))
         label[m["removed"]] = BG
     st["particles_removed_px"] = int(m["removed"].sum())
+    st["particles_removed_audit_px"] = int(m["removed_audit"].sum())
+
+    # graph (steps 4-5) runs before the extras: the saturated-blob radius is
+    # defined from its median wire width, the same width the junction bands use
+    q, jb = pcfg["qc_chains"], pcfg["junction_band"]
+    m["qc"] = zero
+    m["band"] = zero
+    m["nodes3"] = []
+    st["chains_qc_ignored"] = 0
+    width = float("nan")
+    if q["enabled"] or jb["enabled"]:
+        gm = graph_mask(teacher, label, m["filled"])
+        g = graph_qc(gm, label == WIRE, info["angles_deg"],
+                     wire_extract_params(q["graph_junction_close"]), q["fail_flags"])
+        width = g["median_width_px"]
+        st.update({"graph_mask_coverage": float(gm.mean()),
+                   "chains_total": g["n_chains"], "junction_nodes_all": g["n_junction_nodes"],
+                   "junction_nodes_deg3": len(g["nodes3"]),
+                   "median_width_px": width, "median_width_nm": width * NM_PER_PX})
+        if q["enabled"]:
+            m["qc"] = g["qc_px"]
+            st["chains_qc_ignored"] = g["n_failed"]
+            label[m["qc"]] = IGNORE
+        if jb["enabled"]:
+            radius = (jb["radius_width_mult"] * width
+                      if jb["radius_px"] == "auto" else float(jb["radius_px"]))
+            st["junction_radius_px"] = radius
+            if np.isfinite(radius):
+                m["band"] = junction_band(label.shape, g["nodes3"], radius)
+                m["nodes3"] = g["nodes3"]
+                label[m["band"]] = IGNORE
+            st["junction_bands"] = len(m["nodes3"])
+    st["qc_ignored_px"] = int(m["qc"].sum())
+    st["junction_band_px"] = int(m["band"].sum())
+    if not np.isfinite(width):                   # graph disabled or empty
+        width = median_width_px(teacher)
 
     sc = pcfg["saturated"]
     m["saturated"] = zero
-    st["saturated_components"] = st["saturated_blobs"] = 0
+    st["saturated_blobs"] = 0
     if sc["enabled"]:
-        m["saturated"], st["saturated_components"], st["saturated_blobs"] = saturated_components(
-            comps & ~m["removed"], gray, sc["level"], sc["min_blob_px"], sc["touch_px"])
+        r = sc["radius_width_mult"] * width
+        st["saturated_radius_px"] = r
+        m["saturated"], st["saturated_blobs"] = saturated_near(
+            comps & ~m["removed"], gray, sc["level"], sc["min_blob_px"], r)
         label[m["saturated"]] = IGNORE
     st["saturated_ignored_px"] = int(m["saturated"].sum())
 
@@ -307,36 +354,6 @@ def clean_frame(gray: np.ndarray, pcfg: dict) -> tuple[np.ndarray, np.ndarray, d
             gray, dc["sigma_px"], dc["dark_frac"], dc["min_area_frac"], dc["margin_px"])
         label[m["dark_edge"]] = IGNORE
     st["dark_edge_px"] = int(m["dark_edge"].sum())
-
-    q, jb = pcfg["qc_chains"], pcfg["junction_band"]
-    m["qc"] = zero
-    m["band"] = zero
-    m["nodes3"] = []
-    st["chains_qc_ignored"] = 0
-    if q["enabled"] or jb["enabled"]:
-        gm = graph_mask(teacher, label, m["filled"])
-        g = graph_qc(gm, label == WIRE, info["angles_deg"],
-                     wire_extract_params(q["graph_junction_close"]), q["fail_flags"])
-        st.update({"graph_mask_coverage": float(gm.mean()),
-                   "chains_total": g["n_chains"], "junction_nodes_all": g["n_junction_nodes"],
-                   "junction_nodes_deg3": len(g["nodes3"]),
-                   "median_width_px": g["median_width_px"],
-                   "median_width_nm": g["median_width_px"] * NM_PER_PX})
-        if q["enabled"]:
-            m["qc"] = g["qc_px"]
-            st["chains_qc_ignored"] = g["n_failed"]
-            label[m["qc"]] = IGNORE
-        if jb["enabled"]:
-            radius = (jb["radius_width_mult"] * g["median_width_px"]
-                      if jb["radius_px"] == "auto" else float(jb["radius_px"]))
-            st["junction_radius_px"] = radius
-            if np.isfinite(radius):
-                m["band"] = junction_band(label.shape, g["nodes3"], radius)
-                m["nodes3"] = g["nodes3"]
-                label[m["band"]] = IGNORE
-            st["junction_bands"] = len(m["nodes3"])
-    st["qc_ignored_px"] = int(m["qc"].sum())
-    st["junction_band_px"] = int(m["band"].sum())
 
     w = median_width_px(label == WIRE)
     st["label_wire_width_px"], st["label_wire_width_nm"] = w, w * NM_PER_PX
@@ -361,10 +378,11 @@ def _outline(img: np.ndarray, mask: np.ndarray, color) -> None:
 
 C_WIRE, C_IGN, C_QC = (0, 200, 0), (230, 200, 0), (255, 0, 255)
 C_JUNC, C_HOLE, C_PART = (255, 140, 0), (0, 120, 255), (255, 0, 0)
-C_SAT, C_DARK = (0, 230, 230), (150, 80, 30)
+C_SAT, C_DARK, C_AUDIT = (0, 230, 230), (150, 80, 30), (140, 0, 255)
 LEGEND = [("wire", C_WIRE), ("ignore", C_IGN), ("QC-failed chain", C_QC),
           ("junction band", C_JUNC), ("filled hole", C_HOLE), ("removed particle", C_PART),
-          ("saturated-blob comp.", C_SAT), ("dark-region edge", C_DARK)]
+          ("removed, newly (area>=prev limit)", C_AUDIT),
+          ("near saturated blob", C_SAT), ("dark-region edge", C_DARK)]
 
 
 def qc_overlay(gray: np.ndarray, label: np.ndarray, m: dict, title: str) -> np.ndarray:
@@ -382,8 +400,11 @@ def qc_overlay(gray: np.ndarray, label: np.ndarray, m: dict, title: str) -> np.n
     _tint(ov, m["saturated"], C_SAT, 0.55)
     _tint(ov, m["dark_edge"], C_DARK, 0.6)
     _tint(ov, m["filled"], C_HOLE, 0.75)
-    _tint(ov, m["removed"], C_PART, 0.6)
-    _outline(ov, m["removed"], C_PART)           # thick outline: removals must be visible
+    old = m["removed"] & ~m["removed_audit"]
+    _tint(ov, old, C_PART, 0.6)
+    _outline(ov, old, C_PART)                    # thick outline: removals must be visible
+    _tint(ov, m["removed_audit"], C_AUDIT, 0.6)
+    _outline(ov, m["removed_audit"], C_AUDIT)
 
     panel = np.concatenate([base, np.full((g8.shape[0], 8, 3), 255, np.uint8), ov], axis=1)
     bar = np.full((52, panel.shape[1], 3), 255, np.uint8)
@@ -435,7 +456,8 @@ def main() -> None:
         Image.fromarray(qc_overlay(gray, label, m, title)).save(out / f"{name}_qc.png")
         per_frame[name] = st
         print(f"[{i:2d}/{len(frames)}] {title}  holes {st['holes_filled']}/{st['holes_narrow']}"
-              f"  particles {st['particles_removed']}  sat-comps {st['saturated_components']}"
+              f"  particles {st['particles_removed']} (new {st['particles_removed_audit']})"
+              f"  sat-blobs {st['saturated_blobs']} r={st.get('saturated_radius_px', float('nan')):.1f}"
               f"  dark {st['dark_regions']} ({st['dark_region_frac']:.1%})"
               f"  qc-chains {st['chains_qc_ignored']}/{st.get('chains_total', 0)}"
               f"  bands {st.get('junction_bands', 0)}  r={st.get('junction_radius_px', float('nan')):.1f}px"

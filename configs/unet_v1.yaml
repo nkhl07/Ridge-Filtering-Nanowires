@@ -27,18 +27,23 @@ pseudo_labels:
   #   rest of core (core eroded by band_px)                     -> wire
   #   resp <= lo_mult*thr, outside teacher mask and band        -> background
   #   otherwise (closing-added px, lo..hi halo)                 -> ignore
-  confidence: {enabled: true, lo_mult: 0.5, hi_mult: 1.0, band_px: 1}
+  confidence: {enabled: true, lo_mult: 0.5, hi_mult: 1.0, band_px: 0}     # v1c: band 1 -> 0
   # Step 2. fill holes inside wire components only if narrow (max EDT of the hole
   # <= max_hole_halfwidth_px) AND dark (hole mean < median of its bbox padded by
   # local_window_px/2) -- bright debris interiors stay unfilled
   hole_fill: {enabled: true, max_hole_halfwidth_px: 4, local_window_px: 64}
   # Step 3. whole teacher components (+ step-2 fills) with major/minor < max_axis_ratio
   # AND area < max_area -> background.
-  # 220 px ~ area of a disk 3 nominal wire widths across (30 nm / 5.4 nm/px = 5.6 px)
-  particles: {enabled: true, max_axis_ratio: 3.0, max_particle_area_px: 220}
-  # Extra. teacher components within touch_px of a saturated bright blob
-  # (gray >= level on the per-frame min-max [0,255] image, >= min_blob_px px) -> ignore
-  saturated: {enabled: true, level: 250, min_blob_px: 4, touch_px: 3}
+  # v1c: 220 -> 600 (set from v1b overlays: large dark pits incl. their halo
+  # survived as wire). Removals with area >= audit_prev_max_area_px get their own
+  # overlay colour so the newly removed components can be audited.
+  particles: {enabled: true, max_axis_ratio: 3.0, max_particle_area_px: 600,
+              audit_prev_max_area_px: 220}
+  # Extra. teacher px within radius_width_mult x the frame's median wire width
+  # (wire_extract graph, same width as the junction bands) of a saturated bright
+  # blob (gray >= level on the per-frame min-max [0,255] image, >= min_blob_px px)
+  # -> ignore. v1c: local radius instead of whole components.
+  saturated: {enabled: true, level: 250, min_blob_px: 4, radius_width_mult: 2.0}
   # Extra. large dark regions (charging bands): gaussian(sigma_px) gray < dark_frac x
   # frame median, area >= min_area_frac of the frame; px within margin_px of the
   # region boundary (either side) -> ignore

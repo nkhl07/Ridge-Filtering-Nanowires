@@ -14,10 +14,11 @@ from unet.common import BG, IGNORE, WIRE   # first: puts scripts/ridge on sys.pa
 from unet import pseudo_labels as pl
 import wire_extract as wx  # noqa: E402
 
-CFG = {"confidence": {"enabled": True, "lo_mult": 0.5, "hi_mult": 1.0, "band_px": 1},
+CFG = {"confidence": {"enabled": True, "lo_mult": 0.5, "hi_mult": 1.0, "band_px": 0},
        "hole_fill": {"enabled": True, "max_hole_halfwidth_px": 4, "local_window_px": 64},
-       "particles": {"enabled": True, "max_axis_ratio": 3.0, "max_particle_area_px": 220},
-       "saturated": {"enabled": True, "level": 250, "min_blob_px": 4, "touch_px": 3},
+       "particles": {"enabled": True, "max_axis_ratio": 3.0, "max_particle_area_px": 600,
+                     "audit_prev_max_area_px": 220},
+       "saturated": {"enabled": True, "level": 250, "min_blob_px": 4, "radius_width_mult": 2.0},
        "dark_region": {"enabled": True, "sigma_px": 8, "dark_frac": 0.5,
                        "min_area_frac": 0.01, "margin_px": 8},
        "qc_chains": {"enabled": True, "fail_flags": [], "graph_junction_close": False},
@@ -72,10 +73,14 @@ def test_particles() -> None:
     w[50:54, 20:100] = True              # 4x80 wire -> kept (elongated)
     w[100:120, 100:120] = True           # 20x20 blob, area 400 >= 220 -> kept (too big)
     w[150:153, 150:153] = True           # 3x3 speck -> removed
-    rem, n = pl.round_particles(w, max_ratio=3.0, max_area=220)
-    assert n == 2, n
+    rem, n, aud, na = pl.round_particles(w, max_ratio=3.0, max_area=220, audit_min_area=100)
+    assert (n, na) == (2, 0), (n, na)
     assert rem[10:16, 10:16].all() and rem[150:153, 150:153].all()
     assert not rem[50:54, 20:100].any() and not rem[100:120, 100:120].any()
+    # raised limit: the 20x20 blob (area 400) is now removed AND flagged for audit
+    rem, n, aud, na = pl.round_particles(w, max_ratio=3.0, max_area=600, audit_min_area=220)
+    assert (n, na) == (3, 1), (n, na)
+    assert aud[100:120, 100:120].all() and not aud[10:16, 10:16].any()
 
 
 def test_saturated() -> None:
@@ -83,12 +88,15 @@ def test_saturated() -> None:
     gray[20:26, 20:26] = 255             # bright debris
     gray[80, 80] = 255                   # single hot pixel: below min_blob_px
     mask = np.zeros((100, 100), bool)
-    mask[18:20, 15:40] = True            # rim component touching the debris
+    mask[18:20, 15:60] = True            # rim wire running away from the debris
     mask[60:63, 10:90] = True            # wire far away
     mask[78:79, 70:90] = True            # wire next to the hot pixel only
-    hit, ncomp, nblob = pl.saturated_components(mask, gray, 250, 4, 3)
-    assert (ncomp, nblob) == (1, 1), (ncomp, nblob)
-    assert hit[18:20, 15:40].all() and not hit[60:63].any() and not hit[78].any()
+    hit, nblob = pl.saturated_near(mask, gray, 250, 4, radius=6)
+    assert nblob == 1, nblob
+    assert hit[18:20, 15:31].all()                       # within 6 px of the blob edge
+    assert not hit[18:20, 33:60].any()                   # rest of the same wire kept (local)
+    assert not hit[60:63].any() and not hit[78].any()
+    assert not hit[~mask].any()                          # only mask px are touched
 
 
 def test_dark_region() -> None:
