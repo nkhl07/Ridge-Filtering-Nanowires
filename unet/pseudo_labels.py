@@ -15,9 +15,12 @@ under results/unet_v1/pseudo_labels/:
   summary.json, config.yaml, provenance.json
 
 Cleaning steps (order fixed, each toggleable in the config):
-  1. confidence split on resp / thr   (no probability map exists for this teacher)
-  2. narrow-hole fill inside wire components
-  3. round small particle removal -> background
+  1. confidence split on the sato response resp vs the frame's Otsu thr
+     (no probability map exists for this teacher), with a boundary ignore band
+  2. narrow AND locally-dark hole fill inside wire components
+  3. round small teacher components -> background
+  extras: teacher components touching saturated bright blobs -> ignore;
+          edges of large dark regions (charging bands) -> ignore
   4. wire px of graph chains failing curvature QC -> ignore (graph built on
      the teacher mask restricted to confidently supported components; see
      graph_mask)
@@ -40,6 +43,7 @@ import numpy as np
 import scipy.ndimage as ndi
 from PIL import Image
 from skimage.measure import regionprops
+from skimage.morphology import skeletonize
 
 from unet.common import (BG, IGNORE, ROOT, WIRE, load_config, rel, select_frames,
                          write_provenance)
@@ -56,35 +60,60 @@ NM_PER_PX = TARGET_PX * 1e9         # every frame is resampled to this scale
 # --------------------------------------------------------------------------
 
 def confidence_split(resp: np.ndarray, thr: float, teacher: np.ndarray,
-                     lo_mult: float, hi_mult: float) -> np.ndarray:
-    """Step 1. wire if resp >= hi*thr; background if resp <= lo*thr and the
-    teacher did not mark it (its closing adds low-response px); else ignore."""
+                     lo_mult: float, hi_mult: float, band_px: float) -> np.ndarray:
+    """Step 1. core = resp > hi_mult*thr (hi_mult 1.0 -> the teacher's own
+    pre-closing mask). Pixels within band_px of the core boundary, on either
+    side, are ignore; the rest of the core is wire (the core eroded by
+    band_px). Background = resp <= lo_mult*thr, outside the teacher mask (its
+    closing adds low-response px) and outside the band. Everything else --
+    closing-added px and the lo..hi halo -- is ignore. band_px 0 disables the band."""
+    core = resp > hi_mult * thr
+    band = np.zeros(resp.shape, bool)
+    if band_px > 0:
+        band = ((core & (ndi.distance_transform_edt(core) <= band_px))
+                | (~core & (ndi.distance_transform_edt(~core) <= band_px)))
     lab = np.full(resp.shape, IGNORE, np.uint8)
-    lab[(resp <= lo_mult * thr) & ~teacher] = BG
-    lab[resp >= hi_mult * thr] = WIRE
+    lab[(resp <= lo_mult * thr) & ~teacher & ~band] = BG
+    lab[core & ~band] = WIRE
     return lab
 
 
-def narrow_holes(wire: np.ndarray, max_halfwidth: float) -> tuple[np.ndarray, int, int]:
-    """Step 2. Holes enclosed by wire whose max distance-transform value is
-    <= max_halfwidth (hollow wire bodies). Wide enclosed regions -- background
-    boxed in by crossing wires -- are left alone. Returns (fill mask, n filled,
-    n holes)."""
+def narrow_holes(wire: np.ndarray, max_halfwidth: float, gray: np.ndarray,
+                 window: int) -> tuple[np.ndarray, dict]:
+    """Step 2. Holes enclosed by wire are filled only if (a) narrow: max
+    distance-transform value <= max_halfwidth (hollow wire bodies; background
+    boxed in by crossing wires is wide and stays), and (b) dark: mean gray of
+    the hole < median gray of its local window (hole bbox padded by window/2
+    on every side). (b) rejects bright debris whose dark rim the ridge filter
+    traces. Returns (fill mask, counts)."""
     holes = ndi.binary_fill_holes(wire) & ~wire
     hl, n = ndi.label(holes)         # 4-conn, same as binary_fill_holes' flood
+    counts = {"holes_total": int(n), "holes_narrow": 0, "holes_filled": 0}
     if n == 0:
-        return np.zeros_like(wire), 0, 0
-    halfwidth = ndi.maximum(ndi.distance_transform_edt(holes), hl, np.arange(1, n + 1))
+        return np.zeros_like(wire), counts
+    idx = np.arange(1, n + 1)
+    narrow = np.asarray(ndi.maximum(ndi.distance_transform_edt(holes), hl, idx)) <= max_halfwidth
+    mean = np.asarray(ndi.mean(gray, hl, idx))
     keep = np.zeros(n + 1, bool)
-    keep[1:] = np.asarray(halfwidth) <= max_halfwidth
-    return keep[hl], int(keep.sum()), n
+    pad = window // 2
+    H, W = gray.shape
+    for i, sl in enumerate(ndi.find_objects(hl)):
+        if sl is None or not narrow[i]:
+            continue
+        win = gray[max(sl[0].start - pad, 0):min(sl[0].stop + pad, H),
+                   max(sl[1].start - pad, 0):min(sl[1].stop + pad, W)]
+        keep[i + 1] = mean[i] < np.median(win)
+    counts["holes_narrow"] = int(narrow.sum())
+    counts["holes_filled"] = int(keep.sum())
+    return keep[hl], counts
 
 
-def round_particles(wire: np.ndarray, max_ratio: float, max_area: int) -> tuple[np.ndarray, int]:
-    """Step 3. 8-connected wire components that are both round (major/minor
-    axis ratio < max_ratio) and small (area < max_area). Returns (mask, count)."""
-    lab, _ = ndi.label(wire, structure=ONES3)
-    out = np.zeros_like(wire)
+def round_particles(mask: np.ndarray, max_ratio: float, max_area: int) -> tuple[np.ndarray, int]:
+    """Step 3. 8-connected components of `mask` (the whole teacher components,
+    not confident-core fragments) that are both round (major/minor axis
+    ratio < max_ratio) and small (area < max_area). Returns (mask, count)."""
+    lab, _ = ndi.label(mask, structure=ONES3)
+    out = np.zeros_like(mask)
     n = 0
     for rp in regionprops(lab):
         if rp.area >= max_area:
@@ -93,6 +122,57 @@ def round_particles(wire: np.ndarray, max_ratio: float, max_area: int) -> tuple[
             out[rp.coords[:, 0], rp.coords[:, 1]] = True
             n += 1
     return out, n
+
+
+def saturated_components(mask: np.ndarray, gray: np.ndarray, level: float,
+                         min_blob_px: int, touch_px: float) -> tuple[np.ndarray, int, int]:
+    """Extra. Components of `mask` touching (within touch_px of) a saturated
+    bright blob (gray >= level, >= min_blob_px px): the ridge filter traces the
+    dark rim around bright debris. Returns (mask of those components, n
+    components, n blobs)."""
+    sat = gray >= level
+    bl, nb = ndi.label(sat, structure=ONES3)
+    if nb == 0:
+        return np.zeros_like(mask), 0, 0
+    big = np.bincount(bl.ravel()) >= min_blob_px
+    big[0] = False
+    blobs = big[bl]
+    near = ndi.distance_transform_edt(~blobs) <= touch_px if blobs.any() else blobs
+    cl, _ = ndi.label(mask, structure=ONES3)
+    hit = np.unique(cl[near & mask])
+    hit = hit[hit > 0]
+    return np.isin(cl, hit), int(hit.size), int(big.sum())
+
+
+def dark_region_edges(gray: np.ndarray, sigma: float, dark_frac: float,
+                      min_area_frac: float, margin_px: float) -> tuple[np.ndarray, int, float]:
+    """Extra. Edges of large dark regions (charging bands etc.): regions where
+    the Gaussian-smoothed gray is below dark_frac x the frame median and that
+    cover >= min_area_frac of the frame. Pixels within margin_px of such a
+    region's boundary (either side) are returned -- the ridge filter fires on
+    that step edge. Returns (edge mask, n regions, region area fraction)."""
+    sm = ndi.gaussian_filter(gray.astype(np.float32), sigma)
+    dark = sm < dark_frac * float(np.median(gray))
+    dl, nd = ndi.label(dark)
+    if nd == 0:
+        return np.zeros(gray.shape, bool), 0, 0.0
+    sizes = np.bincount(dl.ravel())
+    big = sizes >= min_area_frac * gray.size
+    big[0] = False
+    region = big[dl]
+    if not region.any():
+        return np.zeros(gray.shape, bool), 0, 0.0
+    edge = ((region & (ndi.distance_transform_edt(region) <= margin_px))
+            | (~region & (ndi.distance_transform_edt(~region) <= margin_px)))
+    return edge, int(big.sum()), float(region.mean())
+
+
+def median_width_px(mask: np.ndarray) -> float:
+    """Median of 2*EDT over the skeleton of `mask` (wire_extract's width convention)."""
+    if not mask.any():
+        return float("nan")
+    sk = skeletonize(mask)
+    return float(np.median(2.0 * ndi.distance_transform_edt(mask)[sk]))
 
 
 def wire_extract_params(junction_close: bool):
@@ -174,40 +254,65 @@ def clean_frame(gray: np.ndarray, pcfg: dict) -> tuple[np.ndarray, np.ndarray, d
     Returns (label, resp, masks for the overlay, stats)."""
     teacher, resp, info = lf.labelfree_mask(gray, method="otsu")
     thr = info["thr"]
+    pre = resp > thr                         # teacher mask before its closing
     st: dict = {"teacher": {"thr": thr, "angles_deg": info["angles_deg"],
-                            "coverage": float(teacher.mean())}}
+                            "coverage": float(teacher.mean()),
+                            "coverage_preclose": float(pre.mean()),
+                            "width_preclose_nm": median_width_px(pre) * NM_PER_PX}}
     m: dict = {}
+    zero = np.zeros(gray.shape, bool)
 
     c = pcfg["confidence"]
     if c["enabled"]:
-        label = confidence_split(resp, thr, teacher, c["lo_mult"], c["hi_mult"])
+        label = confidence_split(resp, thr, teacher, c["lo_mult"], c["hi_mult"], c["band_px"])
     else:
         label = np.where(teacher, WIRE, BG).astype(np.uint8)
     st["after_confidence"] = {"wire": float((label == WIRE).mean()),
                               "ignore": float((label == IGNORE).mean())}
 
     h = pcfg["hole_fill"]
-    m["filled"] = np.zeros(label.shape, bool)
-    st["holes_total"] = st["holes_filled"] = 0
+    m["filled"] = zero
+    st.update({"holes_total": 0, "holes_narrow": 0, "holes_filled": 0})
     if h["enabled"]:
-        m["filled"], st["holes_filled"], st["holes_total"] = narrow_holes(
-            label == WIRE, h["max_hole_halfwidth_px"])
+        m["filled"], counts = narrow_holes(label == WIRE, h["max_hole_halfwidth_px"],
+                                           gray, h["local_window_px"])
+        st.update(counts)
         label[m["filled"]] = WIRE
     st["holes_filled_px"] = int(m["filled"].sum())
+    comps = teacher | m["filled"]            # whole teacher components (+ fills)
 
     pc = pcfg["particles"]
-    m["removed"] = np.zeros(label.shape, bool)
+    m["removed"] = zero
     st["particles_removed"] = 0
     if pc["enabled"]:
         m["removed"], st["particles_removed"] = round_particles(
-            label == WIRE, pc["max_axis_ratio"], pc["max_particle_area_px"])
+            comps, pc["max_axis_ratio"], pc["max_particle_area_px"])
         label[m["removed"]] = BG
     st["particles_removed_px"] = int(m["removed"].sum())
 
+    sc = pcfg["saturated"]
+    m["saturated"] = zero
+    st["saturated_components"] = st["saturated_blobs"] = 0
+    if sc["enabled"]:
+        m["saturated"], st["saturated_components"], st["saturated_blobs"] = saturated_components(
+            comps & ~m["removed"], gray, sc["level"], sc["min_blob_px"], sc["touch_px"])
+        label[m["saturated"]] = IGNORE
+    st["saturated_ignored_px"] = int(m["saturated"].sum())
+
+    dc = pcfg["dark_region"]
+    m["dark_edge"] = zero
+    st["dark_regions"], st["dark_region_frac"] = 0, 0.0
+    if dc["enabled"]:
+        m["dark_edge"], st["dark_regions"], st["dark_region_frac"] = dark_region_edges(
+            gray, dc["sigma_px"], dc["dark_frac"], dc["min_area_frac"], dc["margin_px"])
+        label[m["dark_edge"]] = IGNORE
+    st["dark_edge_px"] = int(m["dark_edge"].sum())
+
     q, jb = pcfg["qc_chains"], pcfg["junction_band"]
-    m["qc"] = np.zeros(label.shape, bool)
-    m["band"] = np.zeros(label.shape, bool)
+    m["qc"] = zero
+    m["band"] = zero
     m["nodes3"] = []
+    st["chains_qc_ignored"] = 0
     if q["enabled"] or jb["enabled"]:
         gm = graph_mask(teacher, label, m["filled"])
         g = graph_qc(gm, label == WIRE, info["angles_deg"],
@@ -233,6 +338,8 @@ def clean_frame(gray: np.ndarray, pcfg: dict) -> tuple[np.ndarray, np.ndarray, d
     st["qc_ignored_px"] = int(m["qc"].sum())
     st["junction_band_px"] = int(m["band"].sum())
 
+    w = median_width_px(label == WIRE)
+    st["label_wire_width_px"], st["label_wire_width_nm"] = w, w * NM_PER_PX
     st["fractions"] = {"wire": float((label == WIRE).mean()),
                        "background": float((label == BG).mean()),
                        "ignore": float((label == IGNORE).mean())}
@@ -247,36 +354,45 @@ def _tint(img: np.ndarray, mask: np.ndarray, color, alpha: float) -> None:
     img[mask] = ((1 - alpha) * img[mask] + alpha * np.asarray(color, float)).astype(np.uint8)
 
 
-LEGEND = [("wire", (0, 200, 0)), ("ignore", (230, 200, 0)), ("QC-failed chain (ignore)", (255, 0, 255)),
-          ("junction band", (255, 140, 0)), ("filled hole", (0, 120, 255)),
-          ("removed particle", (255, 0, 0))]
+def _outline(img: np.ndarray, mask: np.ndarray, color) -> None:
+    edge = mask & ~ndi.binary_erosion(mask)
+    img[ndi.binary_dilation(edge)] = color
+
+
+C_WIRE, C_IGN, C_QC = (0, 200, 0), (230, 200, 0), (255, 0, 255)
+C_JUNC, C_HOLE, C_PART = (255, 140, 0), (0, 120, 255), (255, 0, 0)
+C_SAT, C_DARK = (0, 230, 230), (150, 80, 30)
+LEGEND = [("wire", C_WIRE), ("ignore", C_IGN), ("QC-failed chain", C_QC),
+          ("junction band", C_JUNC), ("filled hole", C_HOLE), ("removed particle", C_PART),
+          ("saturated-blob comp.", C_SAT), ("dark-region edge", C_DARK)]
 
 
 def qc_overlay(gray: np.ndarray, label: np.ndarray, m: dict, title: str) -> np.ndarray:
     g8 = np.clip(gray, 0, 255).astype(np.uint8)
     base = np.repeat(g8[..., None], 3, axis=2)
     ov = base.copy()
-    _tint(ov, label == WIRE, LEGEND[0][1], 0.35)
-    _tint(ov, (label == IGNORE) & ~m["qc"] & ~m["band"], LEGEND[1][1], 0.35)
-    _tint(ov, m["qc"], LEGEND[2][1], 0.55)
-    _tint(ov, m["band"] & ~m["qc"], LEGEND[1][1], 0.35)
+    special = m["qc"] | m["band"] | m["saturated"] | m["dark_edge"]
+    _tint(ov, label == WIRE, C_WIRE, 0.35)
+    _tint(ov, (label == IGNORE) & ~special, C_IGN, 0.35)
+    _tint(ov, m["qc"], C_QC, 0.55)
+    _tint(ov, m["band"] & ~m["qc"], C_IGN, 0.35)
     for r, c in m["nodes3"]:
-        cv2.circle(ov, (int(round(c)), int(round(r))), 2, LEGEND[3][1], -1)
-    band_edge = m["band"] & ~ndi.binary_erosion(m["band"])
-    ov[band_edge] = LEGEND[3][1]
-    _tint(ov, m["filled"], LEGEND[4][1], 0.75)
-    _tint(ov, m["removed"], LEGEND[5][1], 0.6)
-    edge = m["removed"] & ~ndi.binary_erosion(m["removed"])
-    ov[ndi.binary_dilation(edge)] = LEGEND[5][1]      # thick outline: removals must be visible
+        cv2.circle(ov, (int(round(c)), int(round(r))), 2, C_JUNC, -1)
+    ov[m["band"] & ~ndi.binary_erosion(m["band"])] = C_JUNC
+    _tint(ov, m["saturated"], C_SAT, 0.55)
+    _tint(ov, m["dark_edge"], C_DARK, 0.6)
+    _tint(ov, m["filled"], C_HOLE, 0.75)
+    _tint(ov, m["removed"], C_PART, 0.6)
+    _outline(ov, m["removed"], C_PART)           # thick outline: removals must be visible
 
     panel = np.concatenate([base, np.full((g8.shape[0], 8, 3), 255, np.uint8), ov], axis=1)
-    bar = np.full((34, panel.shape[1], 3), 255, np.uint8)
-    cv2.putText(bar, title, (6, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1, cv2.LINE_AA)
-    x = panel.shape[1] // 2 - 200
+    bar = np.full((52, panel.shape[1], 3), 255, np.uint8)
+    cv2.putText(bar, title, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+    x = 6
     for name, col in LEGEND:
-        cv2.rectangle(bar, (x, 10), (x + 14, 24), col, -1)
-        cv2.putText(bar, name, (x + 18, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-        x += 26 + 9 * len(name)
+        cv2.rectangle(bar, (x, 32), (x + 12, 44), col, -1)
+        cv2.putText(bar, name, (x + 16, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        x += 26 + 8 * len(name)
     return np.concatenate([bar, panel], axis=0)
 
 
@@ -310,16 +426,20 @@ def main() -> None:
         st.update({"filename_mag": meta["filename_mag"], "rescale_to_50k": factor,
                    "native_shape": meta["native_shape"], "shape_50k": list(gray.shape),
                    "ignore_flag": st["fractions"]["ignore"] > pcfg["ignore_flag_frac"],
+                   "train_excluded": any(x in name for x in cfg["frames"]["exclude_from_training"]),
                    "seconds": round(time.time() - t0, 1)})
         fr = st["fractions"]
         title = (f"{name}  x{factor:.3f}  wire {fr['wire']:.1%}  bg {fr['background']:.1%}  "
-                 f"ignore {fr['ignore']:.1%}")
+                 f"ignore {fr['ignore']:.1%}  label width {st['label_wire_width_nm']:.0f} nm"
+                 + ("  [EXCLUDED FROM TRAINING]" if st["train_excluded"] else ""))
         Image.fromarray(qc_overlay(gray, label, m, title)).save(out / f"{name}_qc.png")
         per_frame[name] = st
-        print(f"[{i:2d}/{len(frames)}] {title}  holes {st['holes_filled']}  "
-              f"particles {st['particles_removed']}  qc-chains {st.get('chains_qc_ignored', 0)}"
-              f"/{st.get('chains_total', 0)}  bands {st.get('junction_bands', 0)}  "
-              f"r={st.get('junction_radius_px', float('nan')):.1f}px  ({st['seconds']}s)", flush=True)
+        print(f"[{i:2d}/{len(frames)}] {title}  holes {st['holes_filled']}/{st['holes_narrow']}"
+              f"  particles {st['particles_removed']}  sat-comps {st['saturated_components']}"
+              f"  dark {st['dark_regions']} ({st['dark_region_frac']:.1%})"
+              f"  qc-chains {st['chains_qc_ignored']}/{st.get('chains_total', 0)}"
+              f"  bands {st.get('junction_bands', 0)}  r={st.get('junction_radius_px', float('nan')):.1f}px"
+              f"  ({st['seconds']}s)", flush=True)
 
     def agg(key):
         v = np.array([s["fractions"][key] for s in per_frame.values()])
@@ -335,6 +455,9 @@ def main() -> None:
         "n_frames": len(per_frame),
         "aggregate_fractions": {k: agg(k) for k in ("wire", "background", "ignore")},
         "frames_ignore_above_flag": sorted(n for n, s in per_frame.items() if s["ignore_flag"]),
+        "frames_excluded_from_training": sorted(n for n, s in per_frame.items()
+                                                if s["train_excluded"]),
+        "frames_with_dark_region": sorted(n for n, s in per_frame.items() if s["dark_regions"]),
         "per_frame": per_frame,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2, default=wx._jsonable))
