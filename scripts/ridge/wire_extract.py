@@ -1,9 +1,24 @@
 """Wire extraction stage: skeleton -> graph -> per-wire measurements (Phase 1).
 
-Consumes the v3 pseudo-masks in results/ridge_nanowire_images2/ and converts
-per-pixel masks into per-wire instances: counts, lengths, widths, orientation
-families, junction statistics, QC flags. Flag-only pass: nothing is split or
-deleted automatically; every suspect chain is flagged and kept.
+Consumes the pseudo-masks written by ridge_nanowire_images2.py -- by default
+the label-free pipeline in results/ridge_labelfree/ (results/ridge_v2/ holds
+the v2 comparison masks; pass it with --masks-dir) -- and converts per-pixel
+masks into per-wire instances: counts, lengths, widths, orientation families,
+junction statistics, QC flags. Flag-only pass: nothing is split or deleted
+automatically; every suspect chain is flagged and kept.
+
+Junction closing: both mask pipelines already direction-close their masks
+(label-free at per-image estimated angles, v2 at fixed 0/60/123), so this
+stage does NOT close again by default; main() logs why from
+ridge_coverage.json. `--junction-close` opts in for unclosed masks. On
+label-free masks it then closes at each frame's image-estimated angles
+(ridge_coverage.json per_frame[name]["lf_angles_deg"]); otherwise at
+--close-angles (default 0/60/123). The --validate-gt path always closes both
+GT-frame masks at that GT frame's own label-free angles unless --close-angles
+is given, whatever --masks-dir holds. A frame whose label-free angle list is
+empty is warned about and left unclosed. The v3 masks this stage was first built
+on were unclosed; v3 was removed 2026-10-13 (archived in
+~/ridge-filtering-archive/).
 
 Techniques adapted from fingerprint ridge-feature extraction (Nguyen, Wang &
 Li 2013, J. Information Security and Applications, and the methods it builds
@@ -43,7 +58,12 @@ Outputs per frame under results/wire_extract/<frame>/:
   <frame>_families.png    orientation overlay in the GT hue convention
                           (blue 0 / green 60 / red 123.5; off-family = white)
 Plus results/wire_extract/extract_summary.json across frames, and with
---validate-gt the measurement-level GT comparison gt_validation.json.
+--validate-gt the measurement-level GT comparison gt_validation.json: the two
+80k GT frames are masked with labelfree.labelfree_mask at 50k-equivalent
+scale (masks + settings written under <out>/gt_pipeline/labelfree_<method>/
+for inspection; recomputed every run, never read back) and extraction on
+them is compared with extraction on the GT label masks. GT is used for
+evaluation only.
 
 Deterministic throughout; no RNG anywhere in Phase 1.
 """
@@ -66,8 +86,9 @@ from scipy.stats import ks_2samp
 from skimage.morphology import disk, skeletonize
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ridge_nanowire_images2 import (TARGET_PX, line_kernel, load_frame_50k,
-                                    read_pixel_size)
+from labelfree import DEFAULT_METHOD, labelfree_mask
+from ridge_nanowire_images2 import (CLOSE_ANGLES, TARGET_PX, line_kernel,
+                                    load_frame_50k, read_pixel_size)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -303,9 +324,10 @@ def prune_spurs(sk: np.ndarray, p) -> tuple[np.ndarray, dict]:
 def merge_bridged_junctions(dec: dict, merge_px: float) -> dict:
     """Contract short junction-to-junction connector branches into one node.
 
-    The mandatory junction closing fattens crossings into elongated blobs
-    whose skeletons carry TWO CN=3 points separated by roughly the closing
-    kernel length -- beyond the reach of the 3 px cluster dilation. The
+    The directional junction closing (applied by the mask pipelines) fattens
+    crossings into elongated blobs whose skeletons carry TWO CN=3 points
+    separated by roughly the closing kernel length -- beyond the reach of the
+    3 px cluster dilation. The
     connector segment between them belongs to both crossing wires at once,
     so it cannot be assigned to either chain: clusters joined by a branch
     shorter than `merge_px` are united into one junction node (union-find)
@@ -737,8 +759,15 @@ def measure_chain(ch: dict, edges: list, nm_per_px: float, shape: tuple, p) -> d
 # per-mask orchestration
 # --------------------------------------------------------------------------
 
-def extract_from_mask(mask: np.ndarray, nm_per_px: float, p) -> tuple[list, dict, dict]:
-    """Full extraction on one boolean mask. Returns (records, summary, render)."""
+def extract_from_mask(mask: np.ndarray, nm_per_px: float, p,
+                      close_angles=None) -> tuple[list, dict, dict]:
+    """Full extraction on one boolean mask. Returns (records, summary, render).
+
+    close_angles: line angles (deg) for the opt-in junction closing
+    (p.junction_close only); None -> p.close_angles, else v2's 0/60/123.
+    An empty list (no label-free family peak in the frame) closes nothing and
+    is recorded as junction_close_applied = False; callers warn per frame.
+    """
     H, W = mask.shape
     raw_px = int(mask.sum())
 
@@ -752,13 +781,21 @@ def extract_from_mask(mask: np.ndarray, nm_per_px: float, p) -> tuple[list, dict
 
     close_added = 0
     m2 = m1
+    angles = None
     if p.junction_close:
-        # v2 junction kernels (dir_close in ridge_nanowire_images2): 9 px line
-        # elements at the measured family orientations, so skeletons connect
-        # through crossing dips instead of fragmenting
+        # opt-in only: both mask pipelines already direction-close. Same
+        # kernels as dir_close in ridge_nanowire_images2 -- 9 px line elements
+        # at the family orientations, so skeletons connect through crossing
+        # dips instead of fragmenting
+        if close_angles is not None:
+            angles = [float(a) for a in close_angles]
+        elif p.close_angles is not None:
+            angles = list(p.close_angles)
+        else:
+            angles = [float(a) for a in CLOSE_ANGLES]
         u8 = m1.astype(np.uint8)
         m2 = m1.copy()
-        for ang in p.close_angles:
+        for ang in angles:
             m2 |= cv2.morphologyEx(u8, cv2.MORPH_CLOSE,
                                    line_kernel(p.close_len, ang)).astype(bool)
         close_added = int(m2.sum()) - int(m1.sum())
@@ -834,7 +871,8 @@ def extract_from_mask(mask: np.ndarray, nm_per_px: float, p) -> tuple[list, dict
         "cleanup": {"mask_px_raw": raw_px, "components_raw": int(ncomp),
                     "small_components_removed": removed_comp,
                     "small_px_removed": raw_px - int(m1.sum()),
-                    "junction_close_applied": bool(p.junction_close),
+                    "junction_close_applied": bool(p.junction_close and angles),
+                    "junction_close_angles_deg": angles,
                     "close_added_px": close_added, "mask_px_final": int(m2.sum())},
         "skeleton": {"px_before_prune": sk_px0, "px_after_prune": int(sk.sum()),
                      "trace_incomplete": dec["trace_incomplete"],
@@ -944,12 +982,15 @@ def paint_family_map(records: list, mask: np.ndarray) -> np.ndarray:
     return np.where(mask, fam, -1)
 
 
-def load_gt_frame(fr: dict, out_root: Path, p, _clf_cache={}) -> dict:
+def load_gt_frame(fr: dict, out_root: Path, p, method: str = DEFAULT_METHOD) -> dict:
     """One 80k GT frame at 50k-equivalent: background, scale, per-family GT
-    masks + union, and the cached v3 pipeline mask (computed once if absent,
-    identical code path to production)."""
+    masks + union, and the label-free pipeline mask (labelfree.labelfree_mask
+    with `method`, already direction-closed at angles estimated from this
+    frame). The mask and its settings are written under
+    <out>/gt_pipeline/labelfree_<method>/ for inspection; they are recomputed
+    every run and never read back, so a changed pipeline cannot reuse a stale
+    mask."""
     from gt_labels import FAMILIES, parse_labeled, load_raw
-    from wire_classifier import PROD_THR, load_classifier, wire_probability
 
     name, s = fr["name"], fr["scale_to_50k"]
     raw = load_raw(fr["raw"])
@@ -971,31 +1012,23 @@ def load_gt_frame(fr: dict, out_root: Path, p, _clf_cache={}) -> dict:
     for fam in FAMILIES:
         gt_mask |= fam50[fam]
 
-    gt_mask_dir = out_root / "gt_pipeline"
-    gt_mask_dir.mkdir(parents=True, exist_ok=True)
-    mpath = gt_mask_dir / f"{name}_50k_pseudo.png"
-    if mpath.exists():
-        v3_mask = np.array(Image.open(mpath)) > 127
-    else:
-        if _clf_cache.get("clf") is None:
-            _clf_cache["clf"] = load_classifier()
-            try:
-                import os
-                _clf_cache["clf"].n_jobs = max(1, len(os.sched_getaffinity(0)))
-            except AttributeError:
-                pass
-        prob = wire_probability(_clf_cache["clf"], img50 / 255.0)
-        np.save(gt_mask_dir / f"{name}_prob.npy", prob.astype(np.float32))
-        v3_mask = prob > PROD_THR
-        Image.fromarray((v3_mask * 255).astype(np.uint8), mode="L").save(mpath)
+    lf_mask, _, lf_info = labelfree_mask(img50.astype(np.float32), method=method)
+    pipe_dir = out_root / "gt_pipeline" / f"labelfree_{method}"
+    pipe_dir.mkdir(parents=True, exist_ok=True)
+    Image.fromarray((lf_mask * 255).astype(np.uint8), mode="L").save(
+        pipe_dir / f"{name}_50k_pseudo.png")
+    with open(pipe_dir / f"{name}_info.json", "w") as f:
+        json.dump(lf_info, f, indent=2, default=_jsonable)
 
     return {"name": name, "bg": bg, "nm_per_px": nm_per_px, "parsed": parsed,
-            "fam50": fam50, "gt_mask": gt_mask, "v3_mask": v3_mask}
+            "fam50": fam50, "gt_mask": gt_mask, "lf_mask": lf_mask, "lf_info": lf_info}
 
 
-def run_gt_validation(out_root: Path, p, params: dict) -> None:
-    """Measurement-level comparison: extraction on GT wire masks vs on the v3
-    pipeline masks for the same two 80k frames. Manuscript material; no gates."""
+def run_gt_validation(out_root: Path, p, params: dict, method: str = DEFAULT_METHOD) -> None:
+    """Measurement-level comparison: extraction on GT wire masks vs on the
+    label-free pipeline masks (labelfree_mask with `method`) for the same two
+    80k frames. Evaluation only -- nothing is tuned on it. Manuscript
+    material; no gates."""
     from gt_labels import FAMILIES, gt_frames
 
     # GT hue convention -> family center (blue ~0/180, green ~60, red ~123.5)
@@ -1008,19 +1041,32 @@ def run_gt_validation(out_root: Path, p, params: dict) -> None:
     if not frames:
         raise SystemExit("GT frames not found -- check data/real/OneDrive_1_7-17-2026")
 
-    validation = {"frames": {}, "params": params}
-    all_gt_len, all_v3_len = [], []
+    validation = {"frames": {}, "params": params,
+                  "pipeline": {"name": "label-free (labelfree.labelfree_mask)",
+                               "lf_method": method,
+                               "gt_use": "evaluation only"}}
+    all_gt_len, all_lf_len = [], []
 
     for fr in frames:
-        b = load_gt_frame(fr, out_root, p)
+        b = load_gt_frame(fr, out_root, p, method)
         name, bg, nm_per_px = b["name"], b["bg"], b["nm_per_px"]
         parsed, fam50 = b["parsed"], b["fam50"]
-        gt_mask, v3_mask = b["gt_mask"], b["v3_mask"]
+        gt_mask, lf_mask = b["gt_mask"], b["lf_mask"]
+        # opt-in closing (--junction-close) uses this frame's image-estimated
+        # angles for both masks unless --close-angles was given
+        close_angles = p.close_angles if p.close_angles is not None \
+            else b["lf_info"]["angles_deg"]
+        print(f"\n{name}: label-free {method} thr {b['lf_info']['thr']:.4f} angles "
+              f"{[round(a, 1) for a in b['lf_info']['angles_deg']]}", flush=True)
+        if p.junction_close and not close_angles:
+            print(f"WARNING {name}: --junction-close but the label-free angle list is "
+                  f"empty (no orientation peak) -- no closing applied to GT or LF",
+                  flush=True)
 
         out = {}
         recs = {}
-        for tag, mask in (("GT", gt_mask), ("v3", v3_mask)):
-            records, summary, render = extract_from_mask(mask, nm_per_px, p)
+        for tag, mask in (("GT", gt_mask), ("LF", lf_mask)):
+            records, summary, render = extract_from_mask(mask, nm_per_px, p, close_angles)
             write_frame_outputs(f"{name}_{tag}", records, summary, render, bg,
                                 out_root, params)
             recs[tag] = records
@@ -1035,24 +1081,25 @@ def run_gt_validation(out_root: Path, p, params: dict) -> None:
                         "orientation_peaks_deg": summary["orientation_peaks_deg"]}
 
         gt_len = [r["length_nm"] for r in recs["GT"]]
-        v3_len = [r["length_nm"] for r in recs["v3"]]
+        lf_len = [r["length_nm"] for r in recs["LF"]]
         all_gt_len.extend(gt_len)
-        all_v3_len.extend(v3_len)
-        ks = ks_2samp(gt_len, v3_len) if gt_len and v3_len else None
+        all_lf_len.extend(lf_len)
+        ks = ks_2samp(gt_len, lf_len) if gt_len and lf_len else None
 
         # pixel-level orientation-family agreement where both assign a family
         gt_count = sum(fam50[f].astype(np.uint8) for f in FAMILIES)
         gt_fam = np.full(bg.shape, -1, np.int16)
         for fam in FAMILIES:
             gt_fam[fam50[fam] & (gt_count == 1)] = hue_fidx[fam]
-        v3_fam = paint_family_map(recs["v3"], v3_mask)
-        both = (gt_fam >= 0) & (v3_fam >= 0)
-        agree = float((gt_fam[both] == v3_fam[both]).mean()) if both.any() else None
+        lf_fam = paint_family_map(recs["LF"], lf_mask)
+        both = (gt_fam >= 0) & (lf_fam >= 0)
+        agree = float((gt_fam[both] == lf_fam[both]).mean()) if both.any() else None
 
-        cnt_ratio_all = out["v3"]["wire_count_all"] / max(out["GT"]["wire_count_all"], 1)
-        cnt_ratio_nb = out["v3"]["wire_count_excl_border"] / max(out["GT"]["wire_count_excl_border"], 1)
+        cnt_ratio_all = out["LF"]["wire_count_all"] / max(out["GT"]["wire_count_all"], 1)
+        cnt_ratio_nb = out["LF"]["wire_count_excl_border"] / max(out["GT"]["wire_count_excl_border"], 1)
         validation["frames"][name] = {
-            "GT": out["GT"], "v3": out["v3"],
+            "GT": out["GT"], "LF": out["LF"],
+            "lf_info": b["lf_info"],
             "wire_count_ratio_all": round(cnt_ratio_all, 3),
             "wire_count_ratio_excl_border": round(cnt_ratio_nb, 3),
             "ks_length": {"stat": round(float(ks.statistic), 4),
@@ -1063,9 +1110,9 @@ def run_gt_validation(out_root: Path, p, params: dict) -> None:
         }
 
         # printable table
-        g, v = out["GT"], out["v3"]
-        print(f"\n=== GT measurement validation: {name} ===")
-        print(f"{'metric':38s} {'GT':>10s} {'v3':>10s} {'v3/GT':>8s}")
+        g, v = out["GT"], out["LF"]
+        print(f"\n=== GT measurement validation: {name} (LF = label-free {method}) ===")
+        print(f"{'metric':38s} {'GT':>10s} {'LF':>10s} {'LF/GT':>8s}")
         rows = [
             ("wire count (all)", g["wire_count_all"], v["wire_count_all"]),
             ("wire count (excl border)", g["wire_count_excl_border"], v["wire_count_excl_border"]),
@@ -1090,8 +1137,8 @@ def run_gt_validation(out_root: Path, p, params: dict) -> None:
         if agree is not None:
             print(f"{'pixel family agreement':38s} {agree:10.4f}  (n={int(both.sum())})")
 
-    if all_gt_len and all_v3_len:
-        ks_all = ks_2samp(all_gt_len, all_v3_len)
+    if all_gt_len and all_lf_len:
+        ks_all = ks_2samp(all_gt_len, all_lf_len)
         validation["combined_ks_length"] = {"stat": round(float(ks_all.statistic), 4),
                                             "pvalue": float(ks_all.pvalue)}
         print(f"\ncombined KS on lengths (both frames): {ks_all.statistic:.4f} "
@@ -1102,184 +1149,64 @@ def run_gt_validation(out_root: Path, p, params: dict) -> None:
     print(f"wrote {rel(out_root)}/gt_validation.json")
 
 
-def run_close_ab(out_root: Path, p, params: dict) -> None:
-    """A/B the junction closing on the two 80k GT frames (v3 masks, cached).
-
-    Purpose: separate closing-caused width inflation from mask-caused
-    inflation. Junction recall proxy: fraction of GT-derived junction
-    centroids (extraction on the GT wire mask, closing ON) with a detected
-    junction within p.junction_match_px in each arm. Read-only diagnostic:
-    changes NO defaults; the decision is made from the table.
-    """
-    import copy
-    from gt_labels import gt_frames
-
-    frames = gt_frames()
-    if not frames:
-        raise SystemExit("GT frames not found -- check data/real/OneDrive_1_7-17-2026")
-
-    p_close = copy.copy(p)
-    p_close.junction_close = True
-    p_noclose = copy.copy(p)
-    p_noclose.junction_close = False
-
-    ab = {"params": params, "junction_match_px": p.junction_match_px,
-          "gt_reference": "extraction on GT wire mask, junction closing ON",
-          "frames": {}}
-    pooled = {"close": {}, "no_close": {}, "gt": {}}
-
-    for fr in frames:
-        b = load_gt_frame(fr, out_root, p)
-        name, nm = b["name"], b["nm_per_px"]
-
-        _, gt_sum, gt_ren = extract_from_mask(b["gt_mask"], nm, p_close)
-        ref_j = np.asarray(gt_ren["junction_centroids"], float).reshape(-1, 2)
-        gt_w_med = gt_sum["wires_all"]["width_mean_px"].get("median")
-
-        arms = {}
-        for tag, parm in (("close", p_close), ("no_close", p_noclose)):
-            _, summ, ren = extract_from_mask(b["v3_mask"], nm, parm)
-            det = np.asarray(ren["junction_centroids"], float).reshape(-1, 2)
-            if len(ref_j) and len(det):
-                dmin = np.sqrt(((ref_j[:, None] - det[None]) ** 2).sum(-1)).min(1)
-                jrecall = float((dmin <= p.junction_match_px).mean())
-            else:
-                jrecall = None
-            c, j = summ["cleanup"], summ["junctions"]
-            wa, wb = summ["wires_all"], summ["wires_excl_border"]
-            pre_close = c["mask_px_raw"] - c["small_px_removed"]
-            arms[tag] = {
-                "close_added_px": c["close_added_px"],
-                "close_added_frac_of_pre": round(c["close_added_px"] / pre_close, 4),
-                "width_median_px": wa["width_mean_px"].get("median"),
-                "width_mean_px": wa["width_mean_px"].get("mean"),
-                "width_median_nm": wa["width_mean_nm"].get("median"),
-                "width_mean_nm": wa["width_mean_nm"].get("mean"),
-                "junction_count": j["count"],
-                "clusters_no_branch": j["clusters_no_branch"],
-                "phantom_degree1": j["phantom_degree1_clusters"],
-                "wire_count_all": wa["count"], "wire_count_excl_border": wb["count"],
-                "length_median_nm": wa["length_nm"].get("median"),
-                "junction_recall_proxy": round(jrecall, 4) if jrecall is not None else None,
-                "chains_dropped_subwire": summ["chains_dropped_subwire"]["count"],
-                "qc_flag_counts": summ["qc_flag_counts"],
-            }
-        wcf = (gt_w_med / arms["close"]["width_median_px"]
-               if gt_w_med and arms["close"]["width_median_px"] else None)
-        ab["frames"][name] = {
-            "gt_reference": {"junction_count": len(ref_j),
-                             "width_median_px": gt_w_med,
-                             "wire_count_all": gt_sum["wires_all"]["count"]},
-            "arms": arms,
-            "width_correction_factor_gt_over_close": round(wcf, 4) if wcf else None,
-        }
-        for tag in ("close", "no_close"):
-            for k in ("width_median_px", "junction_recall_proxy"):
-                pooled[tag].setdefault(k, []).append(arms[tag][k])
-        pooled["gt"].setdefault("width_median_px", []).append(gt_w_med)
-
-        print(f"\n=== Junction-closing A/B: {name} (v3 mask; GT ref: "
-              f"{len(ref_j)} junctions, width med {gt_w_med:.2f} px) ===")
-        print(f"{'metric':34s} {'close':>14s} {'no-close':>14s}")
-        rows = [
-            ("close_added_px (frac of pre)",
-             lambda a: f"{a['close_added_px']} ({a['close_added_frac_of_pre']:.1%})"),
-            ("width median px / nm",
-             lambda a: f"{a['width_median_px']:.2f} / {a['width_median_nm']:.1f}"),
-            ("width mean px / nm",
-             lambda a: f"{a['width_mean_px']:.2f} / {a['width_mean_nm']:.1f}"),
-            ("junction count", lambda a: str(a["junction_count"])),
-            ("no-branch clusters", lambda a: str(a["clusters_no_branch"])),
-            ("phantom-degree1 clusters", lambda a: str(a["phantom_degree1"])),
-            ("wire count all / excl-border",
-             lambda a: f"{a['wire_count_all']} / {a['wire_count_excl_border']}"),
-            ("length median nm", lambda a: f"{a['length_median_nm']:.1f}"),
-            ("junction recall proxy",
-             lambda a: f"{a['junction_recall_proxy']:.3f}"
-             if a["junction_recall_proxy"] is not None else "n/a"),
-            ("sub-wire chains dropped", lambda a: str(a["chains_dropped_subwire"])),
-        ]
-        for label, fmt in rows:
-            print(f"{label:34s} {fmt(arms['close']):>14s} {fmt(arms['no_close']):>14s}")
-
-    wc = np.mean(pooled["close"]["width_median_px"])
-    wn = np.mean(pooled["no_close"]["width_median_px"])
-    rc = np.mean([v for v in pooled["close"]["junction_recall_proxy"] if v is not None])
-    rn = np.mean([v for v in pooled["no_close"]["junction_recall_proxy"] if v is not None])
-    wg = np.mean(pooled["gt"]["width_median_px"])
-    width_drop = (wc - wn) / wc if wc else 0.0
-    recall_delta = rc - rn
-    ab["pooled"] = {"width_median_px_close": round(float(wc), 3),
-                    "width_median_px_no_close": round(float(wn), 3),
-                    "width_median_px_gt": round(float(wg), 3),
-                    "width_drop_frac_without_closing": round(float(width_drop), 4),
-                    "junction_recall_close": round(float(rc), 4),
-                    "junction_recall_no_close": round(float(rn), 4),
-                    "width_correction_factor_gt_over_close": round(float(wg / wc), 4)}
-
-    print("\nInterpretation guide:")
-    print("- If no-close cuts width median substantially AND junction recall holds,")
-    print("  closing drives the inflation: reduce close_len (try 5 and 7 px) or drop")
-    print("  closing, and re-run this A/B with those values.")
-    print("- If width median barely moves without closing, inflation is from the v3")
-    print("  texture mask capturing full dark bodies plus rim (not fixable")
-    print("  unsupervised): carry a documented width correction factor")
-    print("  (GT-derived median width / pipeline median width on the GT frames).")
-    print(f"\npooled: width med close {wc:.2f} px vs no-close {wn:.2f} px "
-          f"(drop {width_drop:.1%}); GT {wg:.2f} px; junction recall "
-          f"{rc:.3f} -> {rn:.3f} (delta {recall_delta:+.3f})")
-    if width_drop > 0.15 and recall_delta < 0.05:
-        rec = ("closing is the width-inflation driver and recall survives without "
-               "it: recommend re-running this A/B with --close-len 5 and 7 "
-               "(or --no-junction-close) before the full run")
-    elif width_drop < 0.05:
-        rec = (f"width inflation is mask-driven, not closing-driven: recommend the "
-               f"documented width correction factor {wg / wc:.3f} "
-               f"(GT median / pipeline median) and keeping closing as is")
-    else:
-        rec = ("ambiguous: closing contributes some width but not all -- weigh the "
-               "recall cost in the table before choosing close_len or a "
-               "correction factor")
-    ab["recommendation"] = rec
-    print(f"recommendation: {rec}")
-
-    with open(out_root / "close_ab.json", "w") as f:
-        json.dump(ab, f, indent=2, default=_jsonable)
-    print(f"wrote {rel(out_root)}/close_ab.json")
-
-
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
+def masks_closing_state(cov: dict) -> tuple[bool, str]:
+    """(masks already direction-closed?, why) from a ridge_coverage.json dict.
+
+    Both current mask pipelines close: label-free at per-image angles
+    ("label_free": true) and v2 at fixed 0/60/123 (pipeline string "v2 ...",
+    including the 2026-07-24 v2 backup). "dir_closed": true is written by
+    ridge_nanowire_images2.py for either.
+    """
+    pipe = str(cov.get("pipeline", ""))
+    if cov.get("label_free"):
+        return True, "label-free masks, already direction-closed at image-estimated angles"
+    if pipe.startswith("v2"):
+        return True, f"v2 masks ({pipe!r}), already direction-closed at 0/60/123"
+    if cov.get("dir_closed"):
+        return True, "ridge_coverage.json declares dir_closed=true"
+    return False, f"pipeline {pipe!r} does not declare direction-closed masks"
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--masks-dir", type=Path, default=ROOT / "results" / "ridge_nanowire_images2")
+    ap.add_argument("--masks-dir", type=Path, default=ROOT / "results" / "ridge_labelfree",
+                    help="masks + ridge_coverage.json from ridge_nanowire_images2.py "
+                         "(default results/ridge_labelfree; results/ridge_v2 for v2)")
     ap.add_argument("--raw-dir", type=Path, default=ROOT / "data" / "real" / "NanowireImages2")
-    ap.add_argument("--out", type=Path, default=ROOT / "results" / "wire_extract")
+    ap.add_argument("--out", type=Path, default=ROOT / "results" / "wire_extract",
+                    help="output root (default results/wire_extract)")
     ap.add_argument("--frames", nargs="*", default=None,
                     help="frame name substrings to process (default: all selected)")
-    ap.add_argument("--junction-close", action=argparse.BooleanOptionalAction, default=True,
-                    help="pre-skeleton closing with the v2 junction line kernels")
+    ap.add_argument("--junction-close", action=argparse.BooleanOptionalAction, default=False,
+                    help="opt in to pre-skeleton directional closing (default OFF: both "
+                         "mask pipelines already close). Only for unclosed masks; on "
+                         "label-free masks it uses each frame's lf_angles_deg")
     ap.add_argument("--all-bands", action="store_true",
                     help="also process frames outside the validated rescale band")
     ap.add_argument("--validate-gt", action="store_true",
-                    help="run the measurement-level GT validation on the two 80k frames")
-    ap.add_argument("--close-ab", action="store_true",
-                    help="A/B the junction closing on the two 80k GT frames "
-                         "(diagnostic; changes no defaults). Without --frames, "
+                    help="measurement-level GT validation on the two 80k frames: "
+                         "label-free masks (the masks' lf_method when --masks-dir "
+                         "holds label-free masks, else DEFAULT_METHOD otsu) vs GT "
+                         "label masks (evaluation only). Without --frames, "
                          "processes no production frames")
     # tunables (defaults per the Phase 1 spec)
     ap.add_argument("--min-area", type=int, default=40, help="pre-skeleton min component px")
     ap.add_argument("--close-len", type=int, default=9, help="junction-closing line length px")
-    ap.add_argument("--close-angles", type=str, default="0,60,123",
-                    help="junction-closing line angles deg (v2 kernels)")
+    ap.add_argument("--close-angles", type=str, default=None,
+                    help="with --junction-close: line angles deg, overriding the "
+                         "per-frame label-free angles (default: lf_angles_deg on "
+                         "label-free masks, else 0,60,123; --validate-gt always "
+                         "uses each GT frame's label-free angles)")
     ap.add_argument("--junction-dilate", type=int, default=3, help="CN>=3 cluster dilation px")
     ap.add_argument("--junction-merge-px", type=float, default=6.0,
                     help="contract junction-to-junction connector branches shorter "
                          "than this (bridge filtering; 0 disables). Needed because "
-                         "the junction closing stretches crossings beyond the "
-                         "cluster dilation reach")
+                         "the directional closing in the mask pipelines stretches "
+                         "crossings beyond the cluster dilation reach")
     ap.add_argument("--spur-len", type=float, default=6.0, help="max geodesic px of a spur")
     ap.add_argument("--spur-passes", type=int, default=3, help="max spur-pruning passes")
     ap.add_argument("--spur-warn-frac", type=float, default=0.25,
@@ -1305,8 +1232,6 @@ def parse_args(argv=None):
     ap.add_argument("--min-wire-px", type=float, default=5.0,
                     help="hard drop (not flag) for chains shorter than this: below "
                          "one wire width a chain cannot be a real wire")
-    ap.add_argument("--junction-match-px", type=float, default=5.0,
-                    help="close-ab junction recall proxy: GT-junction match radius px")
     ap.add_argument("--curv-window", type=int, default=25, help="local turning window px")
     ap.add_argument("--rdp-tol", type=float, default=1.5,
                     help="RDP simplification tolerance px for turning measurement")
@@ -1322,7 +1247,8 @@ def parse_args(argv=None):
     args = ap.parse_args(argv)
     args.masks_dir, args.raw_dir, args.out = (args.masks_dir.resolve(), args.raw_dir.resolve(),
                                               args.out.resolve())
-    args.close_angles = [float(a) for a in args.close_angles.split(",")]
+    if args.close_angles is not None:
+        args.close_angles = [float(a) for a in args.close_angles.split(",")]
     args.family_centers = [float(a) for a in args.family_centers.split(",")]
     return args
 
@@ -1335,18 +1261,39 @@ def main() -> None:
                                      "length-scaling total term moved to "
                                      "high_turn_rate (deg/px)")
     out_root = p.out
-    out_root.mkdir(parents=True, exist_ok=True)
 
     cov_path = p.masks_dir / "ridge_coverage.json"
     if not cov_path.exists():
         raise SystemExit(f"missing {cov_path} -- run ridge_nanowire_images2.py first")
     cov = json.load(open(cov_path))
     per_frame = cov["per_frame"]
+    label_free = bool(cov.get("label_free"))
+    closed, why = masks_closing_state(cov)
+    if p.junction_close:
+        src = ("--close-angles" if p.close_angles is not None else
+               "per-frame lf_angles_deg" if label_free else "0/60/123")
+        print(f"junction closing: ON (--junction-close; angles from {src})"
+              + (f" -- NOTE masks are already closed ({why})" if closed else ""))
+        if p.validate_gt and p.close_angles is None:
+            print("junction closing (--validate-gt): GT frames close at each GT "
+                  "frame's label-free angles (pass --close-angles to override)")
+    elif closed:
+        print(f"junction closing: OFF ({why}; pass --junction-close only for unclosed masks)")
+    else:
+        print(f"junction closing: OFF (default) -- {why}; pass --junction-close if "
+              f"these masks are unclosed")
+    params["junction_close_decision"] = {"applied": bool(p.junction_close),
+                                         "masks_already_closed": closed, "reason": why}
+    if p.junction_close and p.validate_gt:
+        params["junction_close_decision"]["gt_validation_angles"] = (
+            "--close-angles" if p.close_angles is not None
+            else "per-GT-frame label-free angles_deg")
+    out_root.mkdir(parents=True, exist_ok=True)
 
     names = sorted(per_frame)
     if p.frames:
         names = [n for n in names if any(f in n for f in p.frames)]
-    elif p.close_ab or p.validate_gt:
+    elif p.validate_gt:
         names = []          # GT-only diagnostic runs process no production frames
     skipped = []
     if not p.all_bands:
@@ -1354,11 +1301,11 @@ def main() -> None:
         names = [n for n in names if per_frame[n]["scale_in_validated_band"]]
     for n in skipped:
         print(f"skip {n}: outside validated rescale band (use --all-bands to include)")
-    if not names and not (p.validate_gt or p.close_ab):
+    if not names and not p.validate_gt:
         raise SystemExit("no frames selected")
 
     agg = {"pipeline": "wire_extract Phase 1 (skeleton->graph->measurements)",
-           "masks": str(rel(cov_path)),
+           "masks": str(rel(cov_path)), "mask_pipeline": cov.get("pipeline"),
            "partial_run": bool(p.frames), "skipped_out_of_band": skipped,
            "params": params, "per_frame": {}}
     pooled_all, pooled_nb = [], []
@@ -1386,7 +1333,17 @@ def main() -> None:
                              f"{mask.shape} -- scale provenance mismatch")
         bg = np.clip(bg_f, 0, 255).astype(np.uint8)
 
-        records, summary, render = extract_from_mask(mask, nm_per_px, p)
+        close_angles = None
+        if p.junction_close and label_free and p.close_angles is None:
+            if "lf_angles_deg" not in meta:
+                raise SystemExit(f"{name}: label-free ridge_coverage.json has no "
+                                 f"lf_angles_deg -- regenerate masks or pass --close-angles")
+            close_angles = meta["lf_angles_deg"]
+            if not close_angles:
+                print(f"WARNING {name}: --junction-close but lf_angles_deg is empty "
+                      f"(no orientation peak) -- no closing applied to this frame",
+                      flush=True)
+        records, summary, render = extract_from_mask(mask, nm_per_px, p, close_angles)
         summary["scale"] = {"nm_per_px": round(nm_per_px, 4),
                             "rescale_to_50k": meta["rescale_to_50k"],
                             "pixel_size_m": meta["pixel_size_m"],
@@ -1424,9 +1381,8 @@ def main() -> None:
               f"({len(names)} frames)")
 
     if p.validate_gt:
-        run_gt_validation(out_root, p, params)
-    if p.close_ab:
-        run_close_ab(out_root, p, params)
+        method = cov.get("lf_method", DEFAULT_METHOD) if label_free else DEFAULT_METHOD
+        run_gt_validation(out_root, p, params, method)
 
 
 if __name__ == "__main__":

@@ -10,9 +10,10 @@ Sources and provenance (deliberately kept separate; recorded in real_stats.json)
            Rationale: the GT labels are ~4 px hollow PEN strokes, so pen width
            contaminates the thin end of any label-derived thickness.
   * COVERAGE TARGET for synthetic_v3
-        <- NOT set here. It must come from a hand-corrected in-band (40-65k)
-           frame; extrapolating the 80k GT correction is explicitly disallowed.
-           This script records the GT coverage and flags it as out-of-band.
+        <- NOT set here. Extrapolating the 80k GT correction is explicitly
+           disallowed, and the hand-corrected in-band frame once planned to
+           supply it was CANCELLED 2026-10-13 (no new manual labels). This
+           script records the GT coverage and flags it as out-of-band.
 
 Key measured fact: real wires are DARK bodies with bright rims -- 75% of GT
 wire pixels are darker than local background. A bright-only threshold scores
@@ -39,7 +40,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gt_labels import FAMILIES, gt_frames, parse_labeled, load_raw
 
 OUT = Path(__file__).resolve().parents[2] / "results" / "real_stats"
-OUT.mkdir(parents=True, exist_ok=True)
 
 N_FWHM_SAMPLES = 500      # perpendicular profiles per family per frame
 PROFILE_HALF = 12         # px each side of the skeleton point (native 80k px)
@@ -132,6 +132,7 @@ def fwhm_dark_dip(raw: np.ndarray, y: float, x: float, ang_deg: float,
 
 # ---------------------------------------------------------------------------
 def main() -> None:
+    OUT.mkdir(parents=True, exist_ok=True)     # here, not at import
     frames = gt_frames()
     if not frames:
         raise SystemExit("No GT frames found.")
@@ -268,7 +269,9 @@ def main() -> None:
                             "fill_holes_per_family": True},
             "thin_mode_source": "raw-frame FWHM of dark dip (labels are ~4px hollow pen strokes)",
             "thick_tail_source": "GT filled labels, 2*EDT on skeleton",
-            "coverage_target_source": "PENDING hand-corrected in-band frame (do NOT extrapolate 80k GT)",
+            "coverage_target_source": ("NOT SET: hand-corrected in-band frame CANCELLED "
+                                       "2026-10-13 (no new manual labels); do NOT "
+                                       "extrapolate 80k GT"),
         },
         "polarity": {
             "gt_wire_px_darker_than_local_bg_frac": 0.753,

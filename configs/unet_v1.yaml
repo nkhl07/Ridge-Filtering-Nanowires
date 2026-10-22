@@ -1,0 +1,43 @@
+# unet_v1: U-Net student on cleaned pseudo-labels from the label-free ridge teacher.
+# GT frames (data/real/OneDrive_1_7-17-2026) are EVALUATION ONLY: nothing below
+# may be chosen by looking at GT numbers.
+run_name: unet_v1
+seed: 0
+
+paths:
+  raw_dir: data/real/NanowireImages2
+  out_root: results/unet_v1
+
+frames:
+  scale_band: [0.625, 1.0]      # ridge_nanowire_images2.VALIDATED_BAND (50k-80k effective)
+  exclude: ["4010×"]            # 12.5x-upscale outlier
+  max_upscale: 2.0              # hard guard: never upsample a frame by more than 2x
+
+pseudo_labels:
+  # Teacher = the implemented production ridge filter: labelfree.labelfree_mask
+  # (sato + per-frame Otsu + directional closing at image-estimated angles).
+  teacher: lf_otsu
+  # Step 1. No probability map exists, so confidence is the sato response
+  # relative to the frame's own Otsu threshold thr (fixed before any GT look):
+  #   resp >= hi_mult*thr                    -> wire
+  #   resp <= lo_mult*thr and not in teacher -> background
+  #   otherwise (incl. closing-added px)     -> ignore
+  confidence: {enabled: true, lo_mult: 0.5, hi_mult: 1.5}
+  # Step 2. fill holes inside wire components only if max EDT of the hole <= this
+  hole_fill: {enabled: true, max_hole_halfwidth_px: 4}
+  # Step 3. wire components with major/minor < max_axis_ratio AND area < max_area -> background.
+  # 220 px ~ area of a disk 3 nominal wire widths across (30 nm / 5.4 nm/px = 5.6 px)
+  particles: {enabled: true, max_axis_ratio: 3.0, max_particle_area_px: 220}
+  # Step 4. wire_extract graph (its default params) on the teacher mask + step-2
+  # fills, restricted to components still holding confident wire after step 3
+  # (the confident core alone is cut at every crossing). Wire px of chains
+  # carrying any fail flag -> ignore. The teacher mask is already
+  # direction-closed, so wire_extract's own closing stays off, as in production.
+  qc_chains:
+    enabled: true
+    fail_flags: [high_curvature, high_turn_rate]
+    graph_junction_close: false
+  # Step 5. all px within radius of a degree>=3 graph node -> ignore.
+  # radius_px: "auto" = radius_width_mult x the frame's median wire width (px)
+  junction_band: {enabled: true, radius_px: auto, radius_width_mult: 2.0}
+  ignore_flag_frac: 0.40        # report-only: flag frames above this ignore fraction

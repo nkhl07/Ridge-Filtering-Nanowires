@@ -15,14 +15,18 @@
 # Wire extraction stage: skeleton -> graph -> per-wire measurements (Phase 1).
 # CPU-only pipeline -- t4 partition because Falcon has no CPU-only partition
 # and t4 is the cheapest/least contended; the GPU idles (same rationale as
-# ridge_full.sbatch). Modest resources: in-band frames are at most 1024x1536
-# and the heaviest step is the RF inference on the two 640x960 GT frames
-# during --validate-gt. Bump --mem if ever run with --all-bands (the 4010x
-# frame upscales to ~245 Mpx). Submit from the repo root; extra args pass
-# through to the script:
+# ridge_full.sbatch). Modest resources: in-band frames are at most 1024x1536,
+# and --validate-gt adds only label-free sato on the two 640x960 GT frames.
+# Bump --mem if ever run with --all-bands (the 4010x frame upscales to
+# ~245 Mpx). Reads results/ridge_labelfree/ by default; those masks are
+# already direction-closed, so no closing flags are needed (wire_extract.py
+# reads ridge_coverage.json and skips its own closing). Submit from the repo
+# root; extra args pass through to the script:
 #   sbatch slurm/wire_extract.sbatch                # all in-band frames
 #   sbatch slurm/wire_extract.sbatch --validate-gt --frames SF251213M_65000×_24
 #                                                   # 3-frame diagnostic
+#   sbatch slurm/wire_extract.sbatch --masks-dir results/ridge_v2 --out results/wire_extract_v2
+#                                                   # v2 comparison masks
 # Python: $PYTHON if set, else ./venv/bin/python, else python3 on PATH.
 cd "$SLURM_SUBMIT_DIR"
 if [ ! -f scripts/ridge/wire_extract.py ]; then
