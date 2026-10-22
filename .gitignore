@@ -8,3 +8,6 @@ __pycache__/
 
 # Local virtual environment
 venv/
+
+# SLURM job logs — not tracked
+logs/
