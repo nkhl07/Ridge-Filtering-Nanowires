@@ -32,13 +32,16 @@ pseudo_labels:
   # <= max_hole_halfwidth_px) AND dark (hole mean < median of its bbox padded by
   # local_window_px/2) -- bright debris interiors stay unfilled
   hole_fill: {enabled: true, max_hole_halfwidth_px: 4, local_window_px: 64}
-  # Step 3. whole teacher components (+ step-2 fills) with major/minor < max_axis_ratio
-  # AND area < max_area -> background.
-  # v1c: 220 -> 600 (set from v1b overlays: large dark pits incl. their halo
-  # survived as wire). Removals with area >= audit_prev_max_area_px get their own
-  # overlay colour so the newly removed components can be audited.
+  # Step 3. whole teacher components (+ step-2 fills) are particles if small
+  # (area < max_particle_area_px) AND round (major/minor < max_axis_ratio) AND compact
+  # (hole-filled area / convex-hull area >= min_filled_solidity); particles -> background,
+  # except those under tiny_ignore_px -> ignore.
+  # v1c: area 220 -> 600 (large dark pits incl. halo survived as wire in v1b).
+  # v1d: + solidity (v1c removed short V/L wires: round moments, empty hull)
+  #      + tiny -> ignore (v1c removed fragments of faint wires as background).
+  # Removals with area >= audit_prev_max_area_px get the purple audit colour.
   particles: {enabled: true, max_axis_ratio: 3.0, max_particle_area_px: 600,
-              audit_prev_max_area_px: 220}
+              min_filled_solidity: 0.6, tiny_ignore_px: 20, audit_prev_max_area_px: 220}
   # Extra. teacher px within radius_width_mult x the frame's median wire width
   # (wire_extract graph, same width as the junction bands) of a saturated bright
   # blob (gray >= level on the per-frame min-max [0,255] image, >= min_blob_px px)

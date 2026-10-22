@@ -17,6 +17,7 @@ import wire_extract as wx  # noqa: E402
 CFG = {"confidence": {"enabled": True, "lo_mult": 0.5, "hi_mult": 1.0, "band_px": 0},
        "hole_fill": {"enabled": True, "max_hole_halfwidth_px": 4, "local_window_px": 64},
        "particles": {"enabled": True, "max_axis_ratio": 3.0, "max_particle_area_px": 600,
+                     "min_filled_solidity": 0.6, "tiny_ignore_px": 20,
                      "audit_prev_max_area_px": 220},
        "saturated": {"enabled": True, "level": 250, "min_blob_px": 4, "radius_width_mult": 2.0},
        "dark_region": {"enabled": True, "sigma_px": 8, "dark_frac": 0.5,
@@ -68,19 +69,27 @@ def test_hole_fill() -> None:
 
 
 def test_particles() -> None:
-    w = np.zeros((200, 200), bool)
-    w[10:16, 10:16] = True               # 6x6 round blob -> removed
-    w[50:54, 20:100] = True              # 4x80 wire -> kept (elongated)
-    w[100:120, 100:120] = True           # 20x20 blob, area 400 >= 220 -> kept (too big)
-    w[150:153, 150:153] = True           # 3x3 speck -> removed
-    rem, n, aud, na = pl.round_particles(w, max_ratio=3.0, max_area=220, audit_min_area=100)
-    assert (n, na) == (2, 0), (n, na)
-    assert rem[10:16, 10:16].all() and rem[150:153, 150:153].all()
-    assert not rem[50:54, 20:100].any() and not rem[100:120, 100:120].any()
-    # raised limit: the 20x20 blob (area 400) is now removed AND flagged for audit
-    rem, n, aud, na = pl.round_particles(w, max_ratio=3.0, max_area=600, audit_min_area=220)
-    assert (n, na) == (3, 1), (n, na)
+    w = np.zeros((220, 220), np.uint8)
+    w[10:16, 10:16] = 1                  # 6x6 compact blob, 36 px -> removed (background)
+    w[50:54, 20:100] = 1                 # 4x80 wire -> kept (elongated)
+    w[100:120, 100:120] = 1              # 20x20 blob, 400 px -> removed at limit 600, audit
+    w[150:153, 150:153] = 1              # 3x3 speck, 9 px -> tiny -> ignore
+    cv2.circle(w, (40, 190), 7, 1, 3)    # ring-shaped pit (<220 px): hollow but compact once filled
+    bar(w, (150, 30), (165, 60), 4)      # short V wire: round moments, mostly empty hull
+    bar(w, (165, 60), (180, 30), 4)
+    r = pl.round_particles(w.astype(bool), max_ratio=3.0, max_area=600, min_solidity=0.6,
+                           audit_min_area=220, tiny_px=20)
+    rem, aud, tiny, n = r["masks"]["removed"], r["masks"]["audit"], r["masks"]["tiny"], r["counts"]
+    assert (n["removed"], n["audit"], n["tiny"]) == (3, 1, 1), n
+    assert n["kept_by_solidity"] == 1, n
+    assert rem[10:16, 10:16].all() and rem[100:120, 100:120].all() and rem[183:198, 33:48].any()
     assert aud[100:120, 100:120].all() and not aud[10:16, 10:16].any()
+    assert tiny[150:153, 150:153].all() and not rem[150:153, 150:153].any()
+    assert not rem[50:54, 20:100].any(), "elongated wire must be kept"
+    assert not rem[25:65, 145:185].any(), "short V wire must be kept (solidity)"
+    # without the solidity test the V would be removed: this is the v1c failure
+    r0 = pl.round_particles(w.astype(bool), 3.0, 600, min_solidity=0.0, tiny_px=20)
+    assert r0["masks"]["removed"][25:65, 145:185].any()
 
 
 def test_saturated() -> None:
