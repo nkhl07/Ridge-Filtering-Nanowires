@@ -100,6 +100,7 @@ V2_LITERALS = {"recall": 0.570, "precision": 0.505, "f1": 0.534,
 V1_LABEL = "harness self-check (removed pipeline)"
 CONTRACT_TOL = 1e-6     # labelfree.sato_response vs v2.pseudo_mask's r
 ORACLE_NOTE = "oracle: uses labels, diagnostic only"
+HEADLINE_F1 = "mean of per-frame F1"  # the F1 every model is reported and gated on
 
 
 # --------------------------------------------------------------------------- v1-era scorer
@@ -393,7 +394,8 @@ def print_table(results: dict) -> None:
                 f"{_f(m['junction_recall'])} {_f(m['coverage_ratio'])} {_f(m.get('ap'))} "
                 f"{_f(m.get('oracle_f1'))} {_f(m.get('oracle_junction_recall'))}")
 
-    print(f"\nMEAN OVER FRAMES   (covR = GT cov / pred cov; or* = {ORACLE_NOTE})")
+    print(f"\nMEAN OVER FRAMES = HEADLINE (F1 = mean of per-frame F1; covR = GT cov / pred cov; "
+          f"or* = {ORACLE_NOTE})")
     print(hdr)
     for name, r in results.items():
         mark = "*" if name == PREDECLARED else " "
@@ -408,7 +410,7 @@ def print_table(results: dict) -> None:
         for fname, pf in r["per_frame"].items():
             print(line(f" {name}@{fname[-1:] if fname[-1:].isdigit() else fname}",
                        pf["metrics"]))
-    print("\nPOOLED PIXELS")
+    print("\nPOOLED PIXELS (secondary; NOT the headline F1, which is the mean of per-frame F1)")
     print(f"{'method':24s} {'recall':>6s} {'prec':>6s} {'F1':>6s} {'jRec':>6s}")
     for name, r in results.items():
         p = r["pooled"]
@@ -439,8 +441,9 @@ def run(frames: list[Frame], names: list[str], out_path: Path,
         mean, pooled = aggregate(per_frame)
         results[name] = {"kind": spec["kind"], "label": spec["label"],
                          "per_frame": per_frame, "mean_over_frames": mean,
+                         "headline_f1": {"value": mean["f1"], "definition": HEADLINE_F1},
                          "pooled": pooled, "seconds": round(time.time() - t0, 1)}
-        print(f"[{name}] F1 {mean['f1']:.3f}  jRec {mean['junction_recall']:.3f}  "
+        print(f"[{name}] F1 (mean of per-frame F1) {mean['f1']:.3f}  jRec {mean['junction_recall']:.3f}  "
               f"({results[name]['seconds']:.0f}s)", flush=True)
         if name.startswith("lf_"):
             for fn_, pf in per_frame.items():
@@ -510,7 +513,8 @@ def run(frames: list[Frame], names: list[str], out_path: Path,
             "ap_and_oracle_input": "the method's continuous score (sato response; "
                                    "RF probability for rf_v3_*), "
                                    "not its thresholded/closed mask",
-            "aggregation": "mean_over_frames (tune_pseudo_mask convention) + pooled pixels",
+            "aggregation": f"headline = mean_over_frames ({HEADLINE_F1}; tune_pseudo_mask "
+                           f"convention); pooled pixels reported as secondary",
         },
         "frames": [{"name": f.name, "scale_to_50k": f.scale_to_50k,
                     "shape_50k": list(f.gt50.shape), "gt_cov": float(f.gt50.mean()),

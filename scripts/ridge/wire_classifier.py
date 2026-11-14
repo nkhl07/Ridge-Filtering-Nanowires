@@ -9,12 +9,14 @@ takes the GT frames to train on; the unverified metric literals are removed.
 Why a classifier: the classical single-response pipeline hit its ceiling --
 an accuracy ladder over hysteresis, percentile normalisation, background
 flattening, blob suppression and shape filtering was neutral-to-worse than
-v2 (sato thr 0.14 + dirclose) at matched coverage. The 2026-07-24 claim that
-a 17-feature RF beats v2 under CROSS-FRAME validation (train GT frame 1 ->
-test GT frame 2 and vice versa) is UNVERIFIED: its RF numbers (incl. F1
-0.571 at p>0.70) were hard-coded literals from an ad-hoc computation that
-is lost, and the quoted recall/precision do not give the quoted F1. The
-reproducible cross-frame number is eval_masks.py --methods rf_v3_lofo.
+v2 (sato thr 0.14 + dirclose) at matched coverage. The 2026-07-24 cross-frame
+RF F1 of 0.571 at p>0.70 was a hard-coded literal from a lost ad-hoc
+computation. REPRODUCED 2026-11-14 as 0.569: leave-one-frame-out retrain with
+this code (train GT frame 1 -> test frame 2 and vice versa), MEAN OF PER-FRAME
+F1, eval_masks.py --methods rf_v3_lofo, SLURM job 859995
+(results/eval/rf_v3_comparator.json). Mean recall/precision 0.614/0.550 --
+their harmonic mean (0.58) is not the mean of per-frame F1, hence the old
+mismatch.
 
 Feature importances: local std (sigma 2/4) carry ~44% -- wires are SMOOTH
 dark bodies against mottled background, a texture signal no ridge filter
@@ -128,8 +130,9 @@ def load_classifier(retrain: bool = False) -> RandomForestClassifier:
                    "sample_seed": SEED},
         "training_data": "2x TiS3_80000x GT frames at 50k-equivalent (x0.625)",
         "prod_thr": PROD_THR,
-        # The cross-frame metrics once hard-coded here (F1 0.571 etc.) are
-        # UNVERIFIED and were removed; see the module docstring.
+        # The cross-frame F1 once hard-coded here (0.571) was reproduced as
+        # 0.569 (leave-one-frame-out, mean of per-frame F1, job 859995) and is
+        # not stored here; see the module docstring.
     }, indent=2))
     print(f"cached -> {MODEL_PATH.relative_to(ROOT)}")
     return clf
