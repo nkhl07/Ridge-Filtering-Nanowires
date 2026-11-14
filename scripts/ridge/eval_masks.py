@@ -22,7 +22,8 @@ harness self-check -- is scored by one harness with one convention:
     GT union. junction_recall =
     |pred & zone| / |zone|. zone_fraction = |zone| / |GT| is printed as a
     convention sanity check (README_v3 quotes ~0.19-0.20).
-  * Every method has a continuous score (the shared sato response), so each
+  * Every method has a continuous score (the shared sato response; the wire
+    probability for the rf_v3 comparator), so each
     also gets threshold-free average precision and an ORACLE coverage-matched
     operating point (threshold = quantile so predicted coverage == GT
     coverage). The oracle USES LABELS and is a diagnostic only -- never an
@@ -399,8 +400,8 @@ def print_table(results: dict) -> None:
         print(line(f"{mark}{name}", r["mean_over_frames"]))
     print(f"  * = pre-declared label-free default ({PREDECLARED}); "
           f"v1_sato_thr0.10 = {V1_LABEL}, not a candidate")
-    print("  AP/or* score the CONTINUOUS output (the shared sato response for every "
-          "method), not the thresholded/closed mask")
+    print("  AP/or* score the CONTINUOUS output (the shared sato response; RF probability "
+          "for rf_v3_*), not the thresholded/closed mask")
     print("\nPER FRAME")
     print(hdr)
     for name, r in results.items():
@@ -506,7 +507,8 @@ def run(frames: list[Frame], names: list[str], out_path: Path,
             "harness_tol": HARNESS_TOL, "contract_tol": CONTRACT_TOL,
             "scorer": "to_50k/score copied verbatim from the removed tune_pseudo_mask.py",
             "oracle": f"threshold = quantile(score, 1 - GT coverage); {ORACLE_NOTE}",
-            "ap_and_oracle_input": "the method's continuous score (sato response), "
+            "ap_and_oracle_input": "the method's continuous score (sato response; "
+                                   "RF probability for rf_v3_*), "
                                    "not its thresholded/closed mask",
             "aggregation": "mean_over_frames (tune_pseudo_mask convention) + pooled pixels",
         },
