@@ -71,3 +71,36 @@ pseudo_labels:
   # radius_px: "auto" = radius_width_mult x the frame's median wire width (px)
   junction_band: {enabled: true, radius_px: auto, radius_width_mult: 2.0}
   ignore_flag_frac: 0.40        # report-only: flag frames above this ignore fraction
+
+# Phase 2: U-Net student (unet/dataset.py, unet/losses.py, unet/train_unet.py).
+# Pseudo-val frames are used ONLY for early stopping / checkpoint choice (and, in
+# Phase 3, the threshold). GT frames are never read in training.
+train:
+  run_name: train_v1
+  pseudo_label_dir: results/unet_v1/pseudo_labels
+  expected_pseudo_label_commit: ce1670a     # v1e labels (user decision 2026-11-14)
+  # frame-level split, stratified by magnification tier (metadata rescale factor):
+  # round(val_frac * n) val frames per tier; a single-frame tier stays in train
+  split: {val_frac: 0.2, seed: 0}
+  data:
+    crop: 256
+    samples_per_epoch: 1024                 # ~3.5x the train-frame area per epoch
+    min_wire_frac: 0.01                     # wire-rich half of every batch
+    rich_grid_stride: 16                    # candidate wire-rich crop corners
+  # no scale / elastic augmentation: pixel scale is calibrated
+  augment: {brightness: 0.08, contrast: 0.15, gamma: 1.2, noise_std_max: 0.03}
+  model: {encoder: resnet34}                # smp.Unet, imagenet weights, in_channels 1, classes 1
+  loss:
+    bce_weight: 1.0
+    dice_weight: 1.0
+    cldice: {enabled: false, weight: 0.5, iters: 5}
+  batch_size: 16
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  epochs: 100                               # diagnostic: --epochs 5
+  early_stop_patience: 15                   # epochs without pseudo-val masked Dice gain
+  amp: true
+  amp_dtype: bfloat16
+  num_workers: 6
+  panel_every: 5
+  panel_size: 512
