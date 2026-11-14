@@ -65,11 +65,13 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 import cv2
+import joblib
 import numpy as np
 from skimage.morphology import disk
 from sklearn.metrics import average_precision_score
@@ -77,6 +79,7 @@ from sklearn.metrics import average_precision_score
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import labelfree  # noqa: E402
 import ridge_nanowire_images2 as v2  # noqa: E402
+import wire_classifier as wc  # noqa: E402
 from gt_labels import FAMILIES, gt_frames, load_raw, parse_labeled  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -247,6 +250,40 @@ def _lf(method: str, **kw) -> Callable[[Frame], Output]:
     return run
 
 
+# rf_v3 comparator (unet_v1 Phase 3): the archived v3 random forest,
+# wire_classifier.py restored from git ee5c3d6. GT-SUPERVISED -- a comparison
+# only, never part of the pipeline. Input = the frame at 50k / 255, exactly as
+# wire_classifier._train builds its training images.
+
+@lru_cache(maxsize=None)
+def _rf_trained(names: tuple[str, ...]):
+    return wc._train(list(names))
+
+
+def _rf_lofo(fr: Frame) -> Output:
+    """Retrain with the archived code on the OTHER GT frame(s), score this one."""
+    others = tuple(f["name"] for f in gt_frames() if f["name"] != fr.name)
+    prob = wc.wire_probability(_rf_trained(others), fr.raw50 / 255.0)
+    return prob > wc.PROD_THR, prob, {"thr": wc.PROD_THR, "trained_on": list(others),
+                                      "split": "leave-one-frame-out"}
+
+
+def _rf_insample(fr: Frame) -> Output:
+    """Shipped rf_v3.joblib (trained on BOTH GT frames): IN-SAMPLE. Also records
+    how far it is from a fresh archived-code retrain on both frames."""
+    if not wc.MODEL_PATH.exists():
+        raise SystemExit(f"{wc.MODEL_PATH} missing: restore it from "
+                         f"~/ridge-filtering-archive/v1_v3_results_2026-10-13.tar")
+    img01 = fr.raw50 / 255.0
+    prob = wc.wire_probability(joblib.load(wc.MODEL_PATH), img01)
+    names = tuple(f["name"] for f in gt_frames())
+    re = wc.wire_probability(_rf_trained(names), img01)
+    return prob > wc.PROD_THR, prob, {
+        "thr": wc.PROD_THR, "trained_on": list(names), "split": "IN-SAMPLE",
+        "max_abs_prob_diff_vs_retrain_both": float(np.abs(prob - re).max()),
+        "mask_px_differing_vs_retrain_both": int(((prob > wc.PROD_THR) != (re > wc.PROD_THR)).sum())}
+
+
 METHODS: dict[str, dict] = {}
 
 
@@ -266,8 +303,15 @@ _register("lf_otsu_noclose", _lf("otsu", close=False), "ablation",
           "lf_otsu without directional closing")
 _register("v2_fixed", _v2, "comparison_label_tuned",
           "v2 classical pseudo_mask: sato > 0.14 + dirclose 0/60/123 (label-tuned)")
+_register("rf_v3_lofo", _rf_lofo, "comparison_supervised",
+          "rf_v3 archived code, leave-one-frame-out retrain, p > 0.70 (GT-supervised)")
+_register("rf_v3_insample", _rf_insample, "in_sample",
+          "IN-SAMPLE: shipped rf_v3.joblib (trained on both GT frames), p > 0.70")
 _register("v1_sato_thr0.10", _v1, "harness_self_check",
           f"{V1_LABEL}: v1 sato s1-3 > 0.10, no closing")
+# run by default / in the selftest: everything but the GT-trained rf_v3 comparator
+DEFAULT_METHODS = [m for m, v in METHODS.items()
+                   if v["kind"] not in ("comparison_supervised", "in_sample")]
 
 
 # --------------------------------------------------------------------------- checks
@@ -550,10 +594,10 @@ def selftest(out_path: Path | None) -> None:
     ref_dir = Path(ref_tmp.name)
     missing_ref = ref_dir / "no_such_reference.json"
     print("selftest: the HARNESS CHECK FAIL below is EXPECTED (reference missing on purpose)")
-    payload = run(frames, list(METHODS), out_path, ref_path=missing_ref)
+    payload = run(frames, DEFAULT_METHODS, out_path, ref_path=missing_ref)
 
     reloaded = json.loads(out_path.read_text())
-    assert reloaded["methods_run"] == list(METHODS)
+    assert reloaded["methods_run"] == DEFAULT_METHODS
     assert reloaded["harness_check"]["status"] == "FAIL"        # missing reference
     assert reloaded["harness_check"]["label"] == V1_LABEL
     assert reloaded["contract_check"]["status"] == "PASS", reloaded["contract_check"]
@@ -575,7 +619,7 @@ def selftest(out_path: Path | None) -> None:
     v1 = payload["results"]["v1_sato_thr0.10"]
     for ev in v1["per_frame"].values():
         assert ev["info"]["max_abs_diff_vs_v2_pseudo_mask_r"] <= CONTRACT_TOL
-    for name in METHODS:
+    for name in DEFAULT_METHODS:
         if name.startswith("lf_") and name != "lf_otsu_fixedangles":
             for ev in payload["results"][name]["per_frame"].values():
                 assert ev["info"]["angles_source"] == "image", name
@@ -621,10 +665,12 @@ def main() -> None:
                 f"label-free alternatives/ablations (reported, never used to pick the\n"
                 f"default); v2_fixed = v2 classical comparison (label-tuned);\n"
                 f"v1_sato_thr0.10 = {V1_LABEL}.\n"
+                f"rf_v3_lofo / rf_v3_insample = GT-trained rf_v3 comparator (unet_v1\n"
+                f"Phase 3); only run when named.\n"
                 f"exit status 3 = harness self-check or sato contract check FAILED\n"
                 f"(the JSON is still written)."))
     ap.add_argument("--methods", default="",
-                    help=f"comma-separated subset of: {', '.join(METHODS)} (default all; "
+                    help=f"comma-separated subset of: {', '.join(METHODS)} (default all but rf_v3_*; "
                          f"bare label-free names like otsu,li mean lf_otsu,lf_li). "
                          f"The harness self-check only runs if v1_sato_thr0.10 is included")
     ap.add_argument("--out", type=Path, default=None,
@@ -637,7 +683,7 @@ def main() -> None:
         selftest(args.out)
         return
 
-    names = [m.strip() for m in args.methods.split(",") if m.strip()] or list(METHODS)
+    names = [m.strip() for m in args.methods.split(",") if m.strip()] or DEFAULT_METHODS
     names = [f"lf_{m}" if m not in METHODS and f"lf_{m}" in METHODS else m for m in names]
     unknown = [m for m in names if m not in METHODS]
     if unknown:
