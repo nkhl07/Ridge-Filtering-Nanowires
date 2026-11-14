@@ -18,8 +18,8 @@ Cleaning steps (order fixed, each toggleable in the config):
   1. confidence split on the sato response resp vs the frame's Otsu thr
      (no probability map exists for this teacher), with a boundary ignore band
   2. narrow AND locally-dark hole fill inside wire components
-  3. small, round AND compact (filled solidity) teacher components -> background;
-     those under tiny_ignore_px -> ignore
+  3. small, round AND compact (filled solidity) teacher components -> ignore,
+     except unmistakable pits (very compact and very round) -> background
   extras (applied after the graph, whose median wire width sets their radius):
           teacher px within 2x median wire width of a saturated bright blob -> ignore;
           edges of large dark regions (charging bands) -> ignore
@@ -111,7 +111,7 @@ def narrow_holes(wire: np.ndarray, max_halfwidth: float, gray: np.ndarray,
 
 
 def round_particles(mask: np.ndarray, max_ratio: float, max_area: int, min_solidity: float,
-                    audit_min_area: int | None = None, tiny_px: int = 0) -> dict:
+                    pit_min_solidity: float, pit_max_ratio: float, tiny_px: int = 0) -> dict:
     """Step 3. 8-connected components of `mask` (whole teacher components, not
     confident-core fragments) are particles if small (area < max_area), round
     (major/minor axis ratio < max_ratio) AND compact (filled solidity =
@@ -119,19 +119,23 @@ def round_particles(mask: np.ndarray, max_ratio: float, max_area: int, min_solid
     keeps short V/L-shaped wires, whose moments look round but whose hull is
     mostly empty; filling first keeps ring-shaped pits compact.
 
-    Particles under tiny_px px go to `tiny` (caller marks them ignore: a speck
-    cannot be told from a wire fragment); the rest go to `removed`
-    (background). `audit` = removed particles with area >= audit_min_area.
+    Particles under tiny_px px go to `tiny` (a speck cannot be told from a
+    wire fragment). Of the rest, unmistakable pits -- filled solidity >=
+    pit_min_solidity AND axis ratio < pit_max_ratio -- go to `pit` (caller
+    marks them background); everything else goes to `ignored` (caller marks
+    them ignore: short V/L wires and rods also pass the particle tests).
     """
     lab, _ = ndi.label(mask, structure=ONES3)
-    out = {k: np.zeros_like(mask) for k in ("removed", "audit", "tiny")}
-    n = {k: 0 for k in ("removed", "audit", "tiny", "kept_by_solidity")}
+    out = {k: np.zeros_like(mask) for k in ("pit", "ignored", "tiny")}
+    n = {k: 0 for k in ("pit", "ignored", "tiny", "kept_by_solidity")}
     for rp in regionprops(lab):
         if rp.area >= max_area:
             continue
-        if rp.axis_major_length / max(rp.axis_minor_length, 1.0) >= max_ratio:
+        ratio = rp.axis_major_length / max(rp.axis_minor_length, 1.0)
+        if ratio >= max_ratio:
             continue
-        if rp.area_filled / max(rp.area_convex, 1) < min_solidity:
+        solidity = rp.area_filled / max(rp.area_convex, 1)
+        if solidity < min_solidity:
             n["kept_by_solidity"] += 1
             continue
         rr, cc = rp.coords[:, 0], rp.coords[:, 1]
@@ -139,11 +143,9 @@ def round_particles(mask: np.ndarray, max_ratio: float, max_area: int, min_solid
             out["tiny"][rr, cc] = True
             n["tiny"] += 1
             continue
-        out["removed"][rr, cc] = True
-        n["removed"] += 1
-        if audit_min_area is not None and rp.area >= audit_min_area:
-            out["audit"][rr, cc] = True
-            n["audit"] += 1
+        k = "pit" if solidity >= pit_min_solidity and ratio < pit_max_ratio else "ignored"
+        out[k][rr, cc] = True
+        n[k] += 1
     return {"masks": out, "counts": n}
 
 
@@ -304,22 +306,22 @@ def clean_frame(gray: np.ndarray, pcfg: dict) -> tuple[np.ndarray, np.ndarray, d
     comps = teacher | m["filled"]            # whole teacher components (+ fills)
 
     pc = pcfg["particles"]
-    m["removed"] = m["removed_audit"] = m["tiny"] = zero
-    st.update({"particles_removed": 0, "particles_removed_audit": 0, "particles_tiny_ignored": 0,
+    m["pit"] = m["removed_ignored"] = m["tiny"] = zero
+    st.update({"particles_pit_bg": 0, "particles_removed_ignored": 0, "particles_tiny_ignored": 0,
                "particles_kept_by_solidity": 0})
     if pc["enabled"]:
         r = round_particles(comps, pc["max_axis_ratio"], pc["max_particle_area_px"],
-                            pc["min_filled_solidity"], pc.get("audit_prev_max_area_px"),
-                            pc["tiny_ignore_px"])
-        m["removed"], m["removed_audit"], m["tiny"] = (r["masks"][k] for k in ("removed", "audit", "tiny"))
-        st.update({"particles_removed": r["counts"]["removed"],
-                   "particles_removed_audit": r["counts"]["audit"],
+                            pc["min_filled_solidity"], pc["pit_min_filled_solidity"],
+                            pc["pit_max_axis_ratio"], pc["tiny_ignore_px"])
+        m["pit"], m["removed_ignored"], m["tiny"] = (r["masks"][k] for k in ("pit", "ignored", "tiny"))
+        st.update({"particles_pit_bg": r["counts"]["pit"],
+                   "particles_removed_ignored": r["counts"]["ignored"],
                    "particles_tiny_ignored": r["counts"]["tiny"],
                    "particles_kept_by_solidity": r["counts"]["kept_by_solidity"]})
-        label[m["removed"]] = BG
-        label[m["tiny"]] = IGNORE
-    st["particles_removed_px"] = int(m["removed"].sum())
-    st["particles_removed_audit_px"] = int(m["removed_audit"].sum())
+        label[m["pit"]] = BG
+        label[m["removed_ignored"] | m["tiny"]] = IGNORE
+    st["particles_pit_bg_px"] = int(m["pit"].sum())
+    st["particles_removed_ignored_px"] = int(m["removed_ignored"].sum())
     st["particles_tiny_ignored_px"] = int(m["tiny"].sum())
 
     # graph (steps 4-5) runs before the extras: the saturated-blob radius is
@@ -364,7 +366,7 @@ def clean_frame(gray: np.ndarray, pcfg: dict) -> tuple[np.ndarray, np.ndarray, d
         r = sc["radius_width_mult"] * width
         st["saturated_radius_px"] = r
         m["saturated"], st["saturated_blobs"] = saturated_near(
-            comps & ~m["removed"] & ~m["tiny"], gray, sc["level"], sc["min_blob_px"], r)
+            comps & ~m["pit"] & ~m["removed_ignored"] & ~m["tiny"], gray, sc["level"], sc["min_blob_px"], r)
         label[m["saturated"]] = IGNORE
     st["saturated_ignored_px"] = int(m["saturated"].sum())
 
@@ -400,10 +402,12 @@ def _outline(img: np.ndarray, mask: np.ndarray, color) -> None:
 
 C_WIRE, C_IGN, C_QC = (0, 200, 0), (230, 200, 0), (255, 0, 255)
 C_JUNC, C_HOLE, C_PART = (255, 140, 0), (0, 120, 255), (255, 0, 0)
-C_SAT, C_DARK, C_AUDIT, C_TINY = (0, 230, 230), (150, 80, 30), (140, 0, 255), (255, 150, 200)
+C_SAT, C_DARK, C_PIGN, C_TINY = (0, 230, 230), (150, 80, 30), (255, 255, 0), (255, 150, 200)
+# C_PART / C_PIGN outlines are exact colours no grayscale or tinted px can take:
+# removal audits cut components out of *_qc.png by them
 LEGEND = [("wire", C_WIRE), ("ignore", C_IGN), ("QC-failed chain", C_QC),
-          ("junction band", C_JUNC), ("filled hole", C_HOLE), ("removed particle", C_PART),
-          ("removed, area>=220", C_AUDIT), ("tiny particle (ignore)", C_TINY),
+          ("junction band", C_JUNC), ("filled hole", C_HOLE), ("pit -> background", C_PART),
+          ("removed -> ignore", C_PIGN), ("tiny particle (ignore)", C_TINY),
           ("near saturated blob", C_SAT), ("dark-region edge", C_DARK)]
 
 
@@ -411,7 +415,7 @@ def qc_overlay(gray: np.ndarray, label: np.ndarray, m: dict, title: str) -> np.n
     g8 = np.clip(gray, 0, 255).astype(np.uint8)
     base = np.repeat(g8[..., None], 3, axis=2)
     ov = base.copy()
-    special = m["qc"] | m["band"] | m["saturated"] | m["dark_edge"] | m["tiny"]
+    special = m["qc"] | m["band"] | m["saturated"] | m["dark_edge"] | m["tiny"] | m["removed_ignored"]
     _tint(ov, label == WIRE, C_WIRE, 0.35)
     _tint(ov, (label == IGNORE) & ~special, C_IGN, 0.35)
     _tint(ov, m["qc"], C_QC, 0.55)
@@ -422,11 +426,10 @@ def qc_overlay(gray: np.ndarray, label: np.ndarray, m: dict, title: str) -> np.n
     _tint(ov, m["saturated"], C_SAT, 0.55)
     _tint(ov, m["dark_edge"], C_DARK, 0.6)
     _tint(ov, m["filled"], C_HOLE, 0.75)
-    old = m["removed"] & ~m["removed_audit"]
-    _tint(ov, old, C_PART, 0.6)
-    _outline(ov, old, C_PART)                    # thick outline: removals must be visible
-    _tint(ov, m["removed_audit"], C_AUDIT, 0.6)
-    _outline(ov, m["removed_audit"], C_AUDIT)
+    _tint(ov, m["pit"], C_PART, 0.6)
+    _outline(ov, m["pit"], C_PART)               # thick outline: removals must be visible
+    _tint(ov, m["removed_ignored"], C_PIGN, 0.6)
+    _outline(ov, m["removed_ignored"], C_PIGN)
     _tint(ov, m["tiny"], C_TINY, 0.8)
 
     panel = np.concatenate([base, np.full((g8.shape[0], 8, 3), 255, np.uint8), ov], axis=1)
@@ -479,8 +482,8 @@ def main() -> None:
         Image.fromarray(qc_overlay(gray, label, m, title)).save(out / f"{name}_qc.png")
         per_frame[name] = st
         print(f"[{i:2d}/{len(frames)}] {title}  holes {st['holes_filled']}/{st['holes_narrow']}"
-              f"  particles {st['particles_removed']} (>=220px {st['particles_removed_audit']},"
-              f" tiny->ign {st['particles_tiny_ignored']}, kept-by-solidity {st['particles_kept_by_solidity']})"
+              f"  particles pit->bg {st['particles_pit_bg']} ->ign {st['particles_removed_ignored']}"
+              f" (tiny->ign {st['particles_tiny_ignored']}, kept-by-solidity {st['particles_kept_by_solidity']})"
               f"  sat-blobs {st['saturated_blobs']} r={st.get('saturated_radius_px', float('nan')):.1f}"
               f"  dark {st['dark_regions']} ({st['dark_region_frac']:.1%})"
               f"  qc-chains {st['chains_qc_ignored']}/{st.get('chains_total', 0)}"
